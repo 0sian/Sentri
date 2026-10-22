@@ -1,0 +1,372 @@
+#!/usr/bin/env python3
+"""
+Companion daemon: lets your phone act as a trackpad + keyboard for this PC.
+
+Works on KDE Plasma (Wayland/X11) and Hyprland because it injects events at the
+kernel level through /dev/uinput, below any compositor.
+
+Auth: challenge-response. The server sends a random nonce, the client answers with
+HMAC-SHA256(token, nonce). The token itself never crosses the wire.
+
+Run:  ./companion_daemon.py            (see README for the uinput permission setup)
+"""
+import argparse
+import asyncio
+import hashlib
+import hmac
+import json
+import logging
+import os
+import secrets
+import socket
+import sys
+from pathlib import Path
+
+import websockets
+from evdev import UInput, ecodes as e
+
+log = logging.getLogger("companion")
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "companion"
+TOKEN_FILE = CONFIG_DIR / "token"
+DEFAULT_PORT = 8765
+
+# ---------------------------------------------------------------------------
+# Character -> (keycode, needs_shift, needs_altgr) tables. uinput sends physical
+# keys, so the compositor's active layout decides what comes out. Pick the table
+# that matches the layout you actually use ("uk" or "us").
+# ---------------------------------------------------------------------------
+LETTERS = {c: getattr(e, f"KEY_{c.upper()}") for c in "abcdefghijklmnopqrstuvwxyz"}
+DIGITS = {str(i): getattr(e, f"KEY_{i}") for i in range(10)}
+
+
+def _build_layout(kind: str) -> dict:
+    m = {}
+    for c, k in LETTERS.items():
+        m[c] = (k, False, False)
+        m[c.upper()] = (k, True, False)
+    for c, k in DIGITS.items():
+        m[c] = (k, False, False)
+    m.update({
+        " ": (e.KEY_SPACE, False, False),
+        "\n": (e.KEY_ENTER, False, False),
+        "\t": (e.KEY_TAB, False, False),
+        "-": (e.KEY_MINUS, False, False), "_": (e.KEY_MINUS, True, False),
+        "=": (e.KEY_EQUAL, False, False), "+": (e.KEY_EQUAL, True, False),
+        "[": (e.KEY_LEFTBRACE, False, False), "{": (e.KEY_LEFTBRACE, True, False),
+        "]": (e.KEY_RIGHTBRACE, False, False), "}": (e.KEY_RIGHTBRACE, True, False),
+        ";": (e.KEY_SEMICOLON, False, False), ":": (e.KEY_SEMICOLON, True, False),
+        ",": (e.KEY_COMMA, False, False), "<": (e.KEY_COMMA, True, False),
+        ".": (e.KEY_DOT, False, False), ">": (e.KEY_DOT, True, False),
+        "/": (e.KEY_SLASH, False, False), "?": (e.KEY_SLASH, True, False),
+        "!": (e.KEY_1, True, False),
+        "%": (e.KEY_5, True, False), "^": (e.KEY_6, True, False),
+        "&": (e.KEY_7, True, False), "*": (e.KEY_8, True, False),
+        "(": (e.KEY_9, True, False), ")": (e.KEY_0, True, False),
+        "$": (e.KEY_4, True, False),
+    })
+    if kind == "uk":
+        m.update({
+            "'": (e.KEY_APOSTROPHE, False, False), "@": (e.KEY_APOSTROPHE, True, False),
+            '"': (e.KEY_2, True, False), "£": (e.KEY_3, True, False),
+            "#": (e.KEY_BACKSLASH, False, False), "~": (e.KEY_BACKSLASH, True, False),
+            "\\": (e.KEY_102ND, False, False), "|": (e.KEY_102ND, True, False),
+            "`": (e.KEY_GRAVE, False, False), "¬": (e.KEY_GRAVE, True, False),
+            "€": (e.KEY_4, False, True),
+        })
+    else:  # us
+        m.update({
+            "'": (e.KEY_APOSTROPHE, False, False), '"': (e.KEY_APOSTROPHE, True, False),
+            "@": (e.KEY_2, True, False), "#": (e.KEY_3, True, False),
+            "\\": (e.KEY_BACKSLASH, False, False), "|": (e.KEY_BACKSLASH, True, False),
+            "`": (e.KEY_GRAVE, False, False), "~": (e.KEY_GRAVE, True, False),
+        })
+    return m
+
+
+NAMED_KEYS = {
+    "enter": e.KEY_ENTER, "backspace": e.KEY_BACKSPACE, "tab": e.KEY_TAB,
+    "esc": e.KEY_ESC, "space": e.KEY_SPACE, "delete": e.KEY_DELETE,
+    "up": e.KEY_UP, "down": e.KEY_DOWN, "left": e.KEY_LEFT, "right": e.KEY_RIGHT,
+    "home": e.KEY_HOME, "end": e.KEY_END, "pageup": e.KEY_PAGEUP, "pagedown": e.KEY_PAGEDOWN,
+    "insert": e.KEY_INSERT, "menu": e.KEY_MENU, "print": e.KEY_SYSRQ,
+    # bare modifier taps (e.g. Super alone opens the launcher on KDE)
+    "super": e.KEY_LEFTMETA, "alt": e.KEY_LEFTALT, "ctrl": e.KEY_LEFTCTRL, "shift": e.KEY_LEFTSHIFT,
+    "f1": e.KEY_F1, "f2": e.KEY_F2, "f3": e.KEY_F3, "f4": e.KEY_F4, "f5": e.KEY_F5,
+    "f6": e.KEY_F6, "f7": e.KEY_F7, "f8": e.KEY_F8, "f9": e.KEY_F9, "f10": e.KEY_F10,
+    "f11": e.KEY_F11, "f12": e.KEY_F12,
+    # media
+    "volup": e.KEY_VOLUMEUP, "voldown": e.KEY_VOLUMEDOWN, "mute": e.KEY_MUTE,
+    "playpause": e.KEY_PLAYPAUSE, "next": e.KEY_NEXTSONG, "prev": e.KEY_PREVIOUSSONG,
+    "brightup": e.KEY_BRIGHTNESSUP, "brightdown": e.KEY_BRIGHTNESSDOWN,
+}
+# single letters/digits are also valid "key" names, handled in resolve_key()
+
+MODIFIERS = {
+    "ctrl": e.KEY_LEFTCTRL, "alt": e.KEY_LEFTALT, "shift": e.KEY_LEFTSHIFT,
+    "super": e.KEY_LEFTMETA, "altgr": e.KEY_RIGHTALT,
+}
+
+BUTTONS = {"left": e.BTN_LEFT, "right": e.BTN_RIGHT, "middle": e.BTN_MIDDLE}
+
+
+def resolve_key(name: str):
+    name = name.lower()
+    if name in NAMED_KEYS:
+        return NAMED_KEYS[name]
+    if len(name) == 1 and name in LETTERS:
+        return LETTERS[name]
+    if len(name) == 1 and name in DIGITS:
+        return DIGITS[name]
+    return None
+
+
+class VirtualInput:
+    """One virtual device that is both a mouse and a keyboard."""
+
+    def __init__(self, layout: str = "uk"):
+        self.layout = _build_layout(layout)
+        keys = set(NAMED_KEYS.values()) | set(MODIFIERS.values()) | set(BUTTONS.values())
+        keys |= set(LETTERS.values()) | set(DIGITS.values())
+        for k, _, _ in self.layout.values():
+            keys.add(k)
+        caps = {
+            e.EV_KEY: sorted(keys),
+            e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL,
+                       e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES],
+        }
+        self.ui = UInput(caps, name="companion-virtual-input", vendor=0x1234, product=0x5678)
+        self._rx = 0.0
+        self._ry = 0.0
+        self._wheel_acc = 0.0
+        self._hwheel_acc = 0.0
+        self._held_buttons = set()
+        self._held_mods = set()
+
+    # -- pointer -----------------------------------------------------------
+    def move(self, dx: float, dy: float):
+        # carry fractional remainders so slow movement isn't lost to rounding
+        self._rx += dx
+        self._ry += dy
+        ix, iy = int(self._rx), int(self._ry)
+        self._rx -= ix
+        self._ry -= iy
+        if ix:
+            self.ui.write(e.EV_REL, e.REL_X, ix)
+        if iy:
+            self.ui.write(e.EV_REL, e.REL_Y, iy)
+        if ix or iy:
+            self.ui.syn()
+
+    def scroll(self, dx: float, dy: float):
+        """dx/dy in wheel 'notches' (1.0 == one click), kernel sign convention:
+        dy > 0 = wheel up (view scrolls up), dx > 0 = scroll right.
+        The client decides natural vs traditional direction before sending."""
+        self._wheel_acc += dy
+        self._hwheel_acc += dx
+        wrote = False
+        for acc_name, hi, lo in (("_wheel_acc", e.REL_WHEEL_HI_RES, e.REL_WHEEL),
+                                 ("_hwheel_acc", e.REL_HWHEEL_HI_RES, e.REL_HWHEEL)):
+            acc = getattr(self, acc_name)
+            hi_units = int(acc * 120)
+            if hi_units:
+                self.ui.write(e.EV_REL, hi, hi_units)
+                setattr(self, acc_name, acc - hi_units / 120.0)
+                # legacy low-res event once a full notch has accumulated
+                notches = int(hi_units / 120)
+                if notches:
+                    self.ui.write(e.EV_REL, lo, notches)
+                wrote = True
+        if wrote:
+            self.ui.syn()
+
+    def button(self, name: str, state: str):
+        code = BUTTONS.get(name)
+        if code is None:
+            return
+        if state == "down":
+            self._held_buttons.add(code)
+            self.ui.write(e.EV_KEY, code, 1)
+            self.ui.syn()
+        elif state == "up":
+            self._held_buttons.discard(code)
+            self.ui.write(e.EV_KEY, code, 0)
+            self.ui.syn()
+        elif state == "click":
+            self.ui.write(e.EV_KEY, code, 1)
+            self.ui.syn()
+            self.ui.write(e.EV_KEY, code, 0)
+            self.ui.syn()
+
+    # -- keyboard ----------------------------------------------------------
+    def _tap(self, code: int, extra_mods=()):
+        for m in extra_mods:
+            self.ui.write(e.EV_KEY, m, 1)
+        self.ui.write(e.EV_KEY, code, 1)
+        self.ui.syn()
+        self.ui.write(e.EV_KEY, code, 0)
+        for m in reversed(extra_mods):
+            self.ui.write(e.EV_KEY, m, 0)
+        self.ui.syn()
+
+    def key(self, name: str, mods=()):
+        code = resolve_key(name)
+        if code is None:
+            log.warning("unknown key %r", name)
+            return
+        mod_codes = [MODIFIERS[m] for m in mods if m in MODIFIERS]
+        self._tap(code, mod_codes)
+
+    def text(self, s: str):
+        for ch in s:
+            spec = self.layout.get(ch)
+            if spec is None:
+                log.debug("no keymap for %r, skipped", ch)
+                continue
+            code, shift, altgr = spec
+            mods = []
+            if shift:
+                mods.append(e.KEY_LEFTSHIFT)
+            if altgr:
+                mods.append(e.KEY_RIGHTALT)
+            self._tap(code, mods)
+
+    def release_all(self):
+        """Never leave a button or modifier stuck if a client disconnects mid-gesture."""
+        for b in list(self._held_buttons):
+            self.ui.write(e.EV_KEY, b, 0)
+        self._held_buttons.clear()
+        for m in MODIFIERS.values():
+            self.ui.write(e.EV_KEY, m, 0)
+        self.ui.syn()
+
+    def close(self):
+        self.release_all()
+        self.ui.close()
+
+
+def load_or_create_token() -> str:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if TOKEN_FILE.exists():
+        return TOKEN_FILE.read_text().strip()
+    token = secrets.token_urlsafe(24)
+    TOKEN_FILE.write_text(token + "\n")
+    TOKEN_FILE.chmod(0o600)
+    return token
+
+
+def lan_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+class Server:
+    def __init__(self, vin: VirtualInput, token: str, max_step: float):
+        self.vin = vin
+        self.token = token.encode()
+        self.max_step = max_step
+        self.active = None  # only one controlling client at a time
+
+    async def handler(self, ws):
+        peer = ws.remote_address
+        nonce = secrets.token_hex(16)
+        try:
+            await ws.send(json.dumps({"t": "challenge", "nonce": nonce}))
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            msg = json.loads(raw)
+            expected = hmac.new(self.token, nonce.encode(), hashlib.sha256).hexdigest()
+            if msg.get("t") != "auth" or not hmac.compare_digest(str(msg.get("hmac", "")), expected):
+                await ws.send(json.dumps({"t": "denied"}))
+                log.warning("auth failed from %s", peer)
+                return
+        except (asyncio.TimeoutError, json.JSONDecodeError, websockets.ConnectionClosed):
+            return
+
+        # newest client wins; kick the old one so a dropped connection never blocks you
+        if self.active is not None and self.active is not ws:
+            try:
+                await self.active.close(code=4000, reason="replaced")
+            except Exception:
+                pass
+        self.active = ws
+        await ws.send(json.dumps({"t": "ok", "host": socket.gethostname()}))
+        log.info("client connected: %s", peer)
+
+        try:
+            async for raw in ws:
+                try:
+                    self.dispatch(json.loads(raw))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as ex:
+                    log.debug("bad message %r: %s", raw, ex)
+        except websockets.ConnectionClosed:
+            pass
+        finally:
+            self.vin.release_all()
+            if self.active is ws:
+                self.active = None
+            log.info("client disconnected: %s", peer)
+
+    def _clamp(self, v: float) -> float:
+        return max(-self.max_step, min(self.max_step, float(v)))
+
+    def dispatch(self, m: dict):
+        t = m["t"]
+        if t == "mv":
+            self.vin.move(self._clamp(m["dx"]), self._clamp(m["dy"]))
+        elif t == "sc":
+            self.vin.scroll(self._clamp(m.get("dx", 0)) , self._clamp(m.get("dy", 0)))
+        elif t == "btn":
+            self.vin.button(m["b"], m["s"])
+        elif t == "text":
+            self.vin.text(str(m["s"])[:2000])
+        elif t == "key":
+            self.vin.key(m["k"], m.get("mods", ()))
+        elif t == "ping":
+            pass  # keepalive handled by websockets ping; app-level ping is a no-op
+
+
+async def amain(args):
+    token = load_or_create_token()
+    vin = VirtualInput(args.layout)
+    srv = Server(vin, token, args.max_step)
+    ip = lan_ip()
+    print(f"\nCompanion daemon listening on ws://{args.host}:{args.port}  (layout: {args.layout})")
+    print(f"  LAN address : {ip}:{args.port}")
+    print(f"  Token       : {token}")
+    print(f"  Token file  : {TOKEN_FILE}\n")
+    try:
+        async with websockets.serve(srv.handler, args.host, args.port,
+                                    ping_interval=15, ping_timeout=10, max_size=64 * 1024):
+            await asyncio.Future()
+    finally:
+        vin.close()
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--host", default="0.0.0.0", help="bind address (default 0.0.0.0)")
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--layout", choices=["uk", "us"], default="uk",
+                   help="keyboard layout used when typing text from the phone")
+    p.add_argument("--max-step", type=float, default=400.0,
+                   help="clamp on a single movement/scroll message (safety)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args()
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    try:
+        asyncio.run(amain(args))
+    except PermissionError:
+        sys.exit("Cannot open /dev/uinput. See README: add a udev rule and join the 'input' group.")
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

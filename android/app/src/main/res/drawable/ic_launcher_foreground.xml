@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- trackpad outline -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#E3B05B"
+        android:strokeWidth="4"
+        android:pathData="M38,30 h32 a8,8 0 0 1 8,8 v32 a8,8 0 0 1 -8,8 h-32 a8,8 0 0 1 -8,-8 v-32 a8,8 0 0 1 8,-8 z" />
+    <!-- finger dot -->
+    <path
+        android:fillColor="#E3B05B"
+        android:pathData="M54,54m-6,0a6,6 0 1,1 12,0a6,6 0 1,1 -12,0" />
+</vector>

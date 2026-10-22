@@ -1,0 +1,11 @@
+[Unit]
+Description=Companion phone-as-trackpad daemon
+After=network-online.target
+
+[Service]
+ExecStart=%h/companion/daemon/.venv/bin/python %h/companion/daemon/companion_daemon.py --layout uk
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
