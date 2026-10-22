@@ -162,6 +162,15 @@ class DesktopApp:
     id: str     # e.g. "org.mozilla.firefox.desktop"
     name: str
     generic: str = ""  # GenericName, e.g. "Web Browser", "File Manager"
+    wm_class: str = ""  # StartupWMClass: the window class the app's windows get, when declared
+
+    def window_classes(self) -> set:
+        """Lower-case window classes this app's windows are likely to have."""
+        stem = self.id.lower().removesuffix(".desktop")
+        names = {stem, stem.rsplit(".", 1)[-1], self.name.lower()}
+        if self.wm_class:
+            names.add(self.wm_class.lower())
+        return names
 
 
 _RISKY_EXEC = re.compile(r"\b(systemctl|loginctl|poweroff|reboot|shutdown|halt|pkexec|sudo|rm)\b")
@@ -205,15 +214,18 @@ def installed_apps() -> list:
                     or f.get("NoDisplay") == "true" or f.get("Hidden") == "true"
                     or _RISKY_EXEC.search(f["Exec"])):
                 continue
-            apps.append(DesktopApp(app_id, f["Name"], f.get("GenericName", "")))
+            apps.append(DesktopApp(app_id, f["Name"], f.get("GenericName", ""), f.get("StartupWMClass", "")))
     return apps
 
 
 class LaunchApp(Tool):
     name = "launch_app"
     description = ("Open an installed desktop app by name (\"Firefox\", \"Spotify\") or kind (\"file manager\"). "
-                   "If the name matches several apps, the error lists them; call again with one of those names.")
-    schema = _schema({"app": {"type": "string", "description": "the app's name as shown in the app launcher"}},
+                   "If it's already open, its window is focused instead of starting another; set new_window "
+                   "only when a second window is really wanted. If the name matches several apps, the error "
+                   "lists them; call again with one of those names.")
+    schema = _schema({"app": {"type": "string", "description": "the app's name as shown in the app launcher"},
+                      "new_window": {"type": "boolean", "description": "launch even if it's already open"}},
                      ["app"])
     fallback_summary = "Open an app"
 
@@ -231,13 +243,35 @@ class LaunchApp(Tool):
         if len({a.name for a in matches}) > 1:
             names = sorted({a.name for a in matches})[:8]
             raise ToolError("several apps match: " + ", ".join(clean(n, 40) for n in names))
-        return {"app": matches[0]}
+        new = args.get("new_window", False)
+        if not isinstance(new, bool):
+            raise ToolError("new_window must be true or false")
+        return {"app": matches[0], "new_window": new}
+
+    async def prepare(self, args):
+        """Look for an open window of the app now, so the summary says what will really happen."""
+        a = self.validate(args)
+        a["existing"] = None
+        if not a["new_window"] and _hyprland():
+            classes = a["app"].window_classes()
+            for c in await _hypr_json("clients"):
+                if str(c.get("class", "")).lower() in classes and ADDRESS.match(str(c.get("address", ""))):
+                    a["existing"] = c["address"]
+                    break
+        return a
 
     def summary(self, args):
-        return f"Open {clean(args['app'].name, 60)}"
+        name = clean(args["app"].name, 60)
+        return f"Switch to {name} (already open)" if args.get("existing") else f"Open {name}"
 
     async def run(self, args):
         app = args["app"]
+        if args.get("existing"):
+            try:
+                await _focus_address(args["existing"])
+                return f"{clean(app.name, 60)} was already open, so I focused it"
+            except ToolError:
+                pass  # the window closed in the meantime: launch it after all
         # A transient scope keeps the app out of the daemon's cgroup, so restarting the
         # daemon doesn't kill what it opened. gtk-launch exits once the app is started.
         await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", "gtk-launch", app.id)
@@ -376,6 +410,21 @@ class GetStatus(Tool):
 ADDRESS = re.compile(r"^0x[0-9a-f]{1,16}$")
 
 
+async def _focus_address(address: str):
+    """Focus a Hyprland window. Lua-configured Hyprland's dispatch takes a Lua expression;
+    the address is regex-checked, so nothing else can reach the Lua string."""
+    if not ADDRESS.match(address):
+        raise ToolError("not a window id")
+    for argv in (("hyprctl", "dispatch", f"hl.dsp.focus({{window='address:{address}'}})"),
+                 ("hyprctl", "dispatch", "focuswindow", f"address:{address}")):  # classic config
+        try:
+            if (await run(*argv)).strip() == "ok":
+                return
+        except ToolError:
+            pass
+    raise ToolError("Hyprland couldn't focus that window")
+
+
 def _need_hyprland():
     if not _hyprland():
         raise ToolError("window control isn't supported on this desktop yet")
@@ -426,17 +475,7 @@ class FocusWindow(Tool):
         return f"Switch to {a['app']}" if "app" in a else self.fallback_summary
 
     async def run(self, a):
-        # Lua-configured Hyprland: dispatch takes a Lua expression. The address is regex-checked
-        # above, so nothing else can reach the Lua string.
-        for argv in (("hyprctl", "dispatch", f"hl.dsp.focus({{window='address:{a['window']}'}})"),
-                     ("hyprctl", "dispatch", "focuswindow", f"address:{a['window']}")):  # classic config
-            try:
-                if (await run(*argv)).strip() == "ok":
-                    break
-            except ToolError:
-                pass
-        else:
-            raise ToolError("Hyprland couldn't focus that window")
+        await _focus_address(a["window"])
         return f"Switched to {a['app']}"
 
 

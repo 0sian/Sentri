@@ -283,6 +283,36 @@ async def confirm_tier_tests():
     check("run_named_command runs exactly the configured argv",
           calls == [["checkupdates"]] and rn.summary(a) == 'Run "updates": checkupdates', (calls, rn.summary(a)))
 
+    # --- launch_app: focus an open window instead of launching another ---
+    apps_dir = Path(os.environ["XDG_DATA_HOME"]) / "applications"
+    (apps_dir / "vivaldi-stable.desktop").write_text(
+        "[Desktop Entry]\nType=Application\nName=Vivaldi\nExec=vivaldi-stable\nStartupWMClass=vivaldi-stable\n")
+    (apps_dir / "vivaldi.desktop").unlink()
+    clients = [{"address": "0xabc", "class": "firefox", "title": "t"},
+               {"address": "0xdef", "class": "vivaldi-stable", "title": "YouTube"}]
+    rec.answers = {"hyprctl clients": __import__("json").dumps(clients), "hyprctl dispatch hl.dsp.focus": "ok"}
+    la = t.LaunchApp()
+    a = await la.prepare({"app": "firefox"})
+    rec.argv.clear()
+    out = await la.run(a)
+    check("launch_app: open app -> summary says switch, focuses it, doesn't launch",
+          la.summary(a) == "Switch to Firefox (already open)" and "already open" in out
+          and rec.argv == [["hyprctl", "dispatch", "hl.dsp.focus({window='address:0xabc'})"]], (la.summary(a), rec.argv))
+    a = await la.prepare({"app": "vivaldi"})
+    check("launch_app matches windows via StartupWMClass", a["existing"] == "0xdef", a)
+    a = await la.prepare({"app": "firefox", "new_window": True})
+    rec.argv.clear()
+    await la.run(a)
+    check("new_window: launches even though it's open", la.summary(a) == "Open Firefox"
+          and rec.argv[0][-1] == "firefox.desktop" and rec.argv[0][0] == "systemd-run", rec.argv)
+    check("new_window must be a boolean", rejects(la, {"app": "firefox", "new_window": "yes"}))
+    a = await la.prepare({"app": "firefox"})
+    rec.answers["hyprctl dispatch hl.dsp.focus"] = t.ToolError("gone")
+    rec.answers["hyprctl dispatch focuswindow"] = t.ToolError("gone")
+    rec.argv.clear()
+    out = await la.run(a)
+    check("window closed meanwhile -> launches after all", out == "Opened Firefox" and rec.argv[-1][0] == "systemd-run", rec.argv)
+
     # --- registry ---
     reg = t.registry()
     check("without an injector there are no keyboard tools; no commands -> no run_named_command",
