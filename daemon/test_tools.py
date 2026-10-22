@@ -300,8 +300,10 @@ GLANCES_V4 = {
     "cpu": {"total": 12.4, "user": 8.1, "system": 3.2, "iowait": 1.0, "cpucore": 8},
     "mem": {"percent": 43.2, "total": 16e9, "used": 6.9e9},
     "load": {"min1": 0.52, "min5": 0.61, "min15": 0.7, "cpucore": 8},
-    "fs": [{"mnt_point": "/", "percent": 61, "size": 233e9, "free": 91e9},
-           {"mnt_point": "/mnt/media", "percent": 88, "size": 4e12, "free": 0.5e12}],
+    "fs": [{"device_name": "/dev/sda1", "mnt_point": "/", "percent": 61, "size": 233e9, "free": 91e9},
+           {"device_name": "/dev/sdb1", "mnt_point": "/mnt/media", "percent": 88, "size": 4e12, "free": 0.5e12},
+           {"device_name": "/dev/nvme0n1p2", "mnt_point": "/etc/hosts", "fs_type": "btrfs", "percent": 74, "size": 256e9, "free": 65e9},
+           {"device_name": "/dev/nvme0n1p2", "mnt_point": "/etc/hostname", "fs_type": "btrfs", "percent": 74, "size": 256e9, "free": 65e9}],
     "network": [{"interface_name": "lo", "bytes_recv_rate_per_sec": 9e9, "bytes_sent_rate_per_sec": 9e9},
                 {"interface_name": "eth0", "bytes_recv_rate_per_sec": 1.2e6, "bytes_sent_rate_per_sec": 3e5}],
     "sensors": [{"label": "Package id 0", "value": 54, "unit": "C", "type": "temperature_core"},
@@ -367,7 +369,10 @@ async def homelab_tests():
     check("cpu/mem/load reduced to one line each",
           "CPU 12% (user 8, system 3, iowait 1), 8 cores" in out["cpu"] and "Memory 43% used (6.9 GB of 16.0 GB)" in out["mem"]
           and "Load 0.52 / 0.61 / 0.70" in out["load"], (out["cpu"], out["mem"], out["load"]))
-    check("fs sorted fullest first", out["fs"].splitlines()[1].startswith("/mnt/media: 88%"), out["fs"])
+    fs = out["fs"].splitlines()[1:]
+    check("fs: one row per disk, fullest first, bind-mounted files named by device",
+          fs[0].startswith("/mnt/media: 88%") and fs[1].startswith("/dev/nvme0n1p2 (btrfs): 74%")
+          and len(fs) == 3 and "/etc/" not in out["fs"], out["fs"])
     check("network skips lo", "lo:" not in out["network"] and "eth0: down 1.20 MB/s, up 0.30 MB/s" in out["network"], out["network"])
     check("sensors keep temperatures", "Package id 0: 54C" in out["sensors"] and "fan1" not in out["sensors"], out["sensors"])
     check("container names cleaned like window titles",

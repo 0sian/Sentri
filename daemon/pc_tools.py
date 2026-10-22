@@ -1033,9 +1033,21 @@ def _glances_summary(sec: str, d) -> str:
     rows = d if isinstance(d, list) else (d.get("containers") or d.get(sec) or []) if isinstance(d, dict) else []
     rows = [r for r in rows if isinstance(r, dict)]
     if sec == "fs":
-        rows.sort(key=lambda r: -_num(r.get("percent")))
-        return "\n".join(f"{clean(r.get('mnt_point', '?'), 40)}: {_num(r.get('percent')):.0f}% of "
-                         f"{_gb(r.get('size'))} ({_gb(r.get('free'))} free)" for r in rows[:6]) or "No filesystems"
+        # Glances in a container sees bind-mounted files (/etc/hosts, ...) as separate entries
+        # on the same disk: keep one row per device, named by a real directory mount if any.
+        by_dev = {}
+        for r in rows:
+            by_dev.setdefault(r.get("device_name") or r.get("mnt_point"), []).append(r)
+        disks = []
+        for dev, rs in by_dev.items():
+            mounts = [str(r.get("mnt_point", "")) for r in rs]
+            dirs = [m for m in mounts if not m.startswith(("/etc/", "/usr/lib/", "/proc", "/sys"))]
+            name = min(dirs, key=len) if dirs else str(dev)
+            fs_type = rs[0].get("fs_type")
+            disks.append((clean(name, 40) + (f" ({clean(fs_type, 12)})" if fs_type else ""), rs[0]))
+        disks.sort(key=lambda d: -_num(d[1].get("percent")))
+        return "\n".join(f"{n}: {_num(r.get('percent')):.0f}% of {_gb(r.get('size'))} ({_gb(r.get('free'))} free)"
+                         for n, r in disks[:6]) or "No filesystems"
     if sec == "network":
         def rate(r, v4, v3):
             if v4 in r:
