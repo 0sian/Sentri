@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""AI chat tests (PROTOCOL-AI.md). A scripted fake replaces the Anthropic backend; no network."""
+import asyncio
+import hashlib
+import hmac
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import websockets
+from evdev import ecodes as e
+
+import ai
+import companion_daemon as cd
+
+
+class FakeUInput:
+    def __init__(self, *a, **k):
+        self.events = []
+
+    def write(self, t, c, v):
+        self.events.append((t, c, v))
+
+    def syn(self):
+        pass
+
+    def close(self):
+        pass
+
+
+cd.UInput = FakeUInput
+
+TOKEN = "test-token"
+PORT = 18775
+TMP = Path(tempfile.mkdtemp())
+failures = []
+
+
+def check(name, cond, detail=""):
+    print(("PASS " if cond else "FAIL ") + name + (f"  {detail}" if detail and not cond else ""))
+    if not cond:
+        failures.append(name)
+
+
+class FakeBackend:
+    """Each call to complete() pops the next script entry:
+    a list of text deltas (optionally ending in a dict of Reply overrides), or an exception."""
+
+    def __init__(self):
+        self.scripts = []
+        self.calls = []        # (system, messages) per call
+        self.delay = 0.0       # seconds between deltas
+
+    async def complete(self, system, messages, on_text):
+        self.calls.append((system, [dict(m) for m in messages]))
+        script = self.scripts.pop(0)
+        if isinstance(script, Exception):
+            raise script
+        over = script[-1] if script and isinstance(script[-1], dict) else {}
+        deltas = [s for s in script if isinstance(s, str)]
+        for d in deltas:
+            await asyncio.sleep(self.delay)
+            await on_text(d)
+        content = over.get("content", [{"type": "thinking", "thinking": "", "signature": "sig"},
+                                       {"type": "text", "text": "".join(deltas)}])
+        return ai.Reply(content, over.get("stop", "end_turn"), over.get("in", 100), over.get("out", 20))
+
+
+def make(cap=0, limit=30000):
+    cfg = ai.AIConfig(api_key="k", daily_token_cap=cap, history_token_limit=limit)
+    backend = FakeBackend()
+    return ai.Assistant(cfg, backend, usage_file=TMP / f"usage-{os.urandom(4).hex()}.json"), backend
+
+
+async def connect(port):
+    ws = await websockets.connect(f"ws://127.0.0.1:{port}")
+    ch = json.loads(await ws.recv())
+    await ws.send(json.dumps({"t": "auth", "hmac": hmac.new(TOKEN.encode(), ch["nonce"].encode(), hashlib.sha256).hexdigest()}))
+    return ws, json.loads(await ws.recv())
+
+
+async def until(ws, t, timeout=2.0):
+    """Collect messages until one of type t arrives; returns (all, last)."""
+    got = []
+    while True:
+        m = json.loads(await asyncio.wait_for(ws.recv(), timeout))
+        got.append(m)
+        if m["t"] == t or (isinstance(t, tuple) and m["t"] in t):
+            return got, m
+
+
+async def server_tests():
+    assistant, be = make()
+    vin = cd.VirtualInput("us")
+    srv = cd.Server(vin, TOKEN, 400.0, assistant)
+    plain = cd.Server(cd.VirtualInput("us"), TOKEN, 400.0)
+    async with websockets.serve(srv.handler, "127.0.0.1", PORT), \
+            websockets.serve(plain.handler, "127.0.0.1", PORT + 1):
+        ws, ok = await connect(PORT + 1)
+        check("no caps without AI configured", "caps" not in ok and "model" not in ok, ok)
+        await ws.send(json.dumps({"t": "chat", "id": 1, "text": "hi"}))
+        _, m = await until(ws, "chat_error")
+        check("chat without AI -> chat_error", m["id"] == 1, m)
+        await ws.close()
+
+        ws, ok = await connect(PORT)
+        check("ok carries caps + model", ok.get("caps") == ["chat"] and ok.get("model") == "claude-haiku-5-5", ok)
+
+        # --- streaming turn ---
+        be.scripts.append(["Hel", "lo ", "Osian", {"in": 900, "out": 12}])
+        await ws.send(json.dumps({"t": "chat", "id": 1, "text": "hello"}))
+        got, done = await until(ws, "chat_done")
+        deltas = [m["text"] for m in got if m["t"] == "chat_delta"]
+        check("deltas streamed in order", deltas == ["Hel", "lo ", "Osian"] and all(m["id"] == 1 for m in got), got)
+        check("chat_done carries usage", done == {"t": "chat_done", "id": 1, "usage": {"in": 900, "out": 12}}, done)
+        check("system prompt sent, includes untrusted-data rule",
+              "data, not instructions" in be.calls[0][0], be.calls[0][0][:80])
+
+        # --- history ---
+        be.scripts.append(["Sure."])
+        await ws.send(json.dumps({"t": "chat", "id": 2, "text": "again"}))
+        await until(ws, "chat_done")
+        sent = be.calls[1][1]
+        check("second turn sends prior exchange (thinking kept verbatim)",
+              [m["role"] for m in sent] == ["user", "assistant", "user"]
+              and sent[1]["content"][0]["type"] == "thinking" and sent[2]["content"] == "again", sent)
+
+        # --- busy ---
+        be.delay = 0.1
+        be.scripts.append(["a", "b", "c", "d"])
+        await ws.send(json.dumps({"t": "chat", "id": 3, "text": "long"}))
+        await ws.send(json.dumps({"t": "chat", "id": 4, "text": "second"}))
+        got, _ = await until(ws, "chat_done")
+        busy = [m for m in got if m["t"] == "chat_error"]
+        check("chat during a turn -> chat_error Busy for that id", busy == [{"t": "chat_error", "id": 4, "msg": "Busy"}], got)
+
+        # --- responsiveness during a streaming turn ---
+        be.delay = 0.2
+        be.scripts.append(["x"] * 5)
+        await ws.send(json.dumps({"t": "chat", "id": 5, "text": "slow"}))
+        await asyncio.sleep(0.05)
+        vin.ui.events.clear()
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await ws.send(json.dumps({"t": "mv", "dx": 7, "dy": 0}))
+        await ws.send(json.dumps({"t": "ping", "id": 99}))
+        got, pong = await until(ws, "pong")
+        dt = loop.time() - t0
+        check("pong answered mid-turn without waiting", pong["id"] == 99 and dt < 0.1, dt)
+        check("mv applied mid-turn", (e.EV_REL, e.REL_X, 7) in vin.ui.events, vin.ui.events)
+
+        # --- cancel mid-stream: partial text kept, marked ---
+        await asyncio.sleep(0.25)
+        await ws.send(json.dumps({"t": "chat_cancel", "id": 5}))
+        got, done = await until(ws, "chat_done")
+        check("chat_cancel -> chat_done cancelled", done == {"t": "chat_done", "id": 5, "cancelled": True}, done)
+        last = assistant.history[-1]
+        check("cancelled turn keeps streamed text, marked [cancelled]",
+              last["role"] == "assistant" and last["content"][0]["text"].endswith("[cancelled]")
+              and not assistant.busy, last)
+
+        # --- error: nothing committed ---
+        be.delay = 0
+        n = len(assistant.history)
+        be.scripts.append(ai.ChatError("Can't reach the AI service."))
+        await ws.send(json.dumps({"t": "chat", "id": 6, "text": "x"}))
+        _, err = await until(ws, ("chat_error", "chat_done"))
+        check("backend error -> chat_error, history untouched",
+              err == {"t": "chat_error", "id": 6, "msg": "Can't reach the AI service."} and len(assistant.history) == n, err)
+
+        # --- refusal: chat_error, not committed ---
+        be.scripts.append(["", {"stop": "refusal", "content": []}])
+        await ws.send(json.dumps({"t": "chat", "id": 7, "text": "x"}))
+        _, err = await until(ws, ("chat_error", "chat_done"))
+        check("refusal -> chat_error, not committed", err["t"] == "chat_error" and len(assistant.history) == n, err)
+
+        # --- too long ---
+        await ws.send(json.dumps({"t": "chat", "id": 8, "text": "x" * 4001}))
+        _, err = await until(ws, ("chat_error", "chat_done"))
+        check("over 4000 chars -> Message too long", err == {"t": "chat_error", "id": 8, "msg": "Message too long"}, err)
+
+        # --- reset during a turn: cancel first, then clear ---
+        be.delay = 0.2
+        be.scripts.append(["a"] * 5)
+        await ws.send(json.dumps({"t": "chat", "id": 9, "text": "x"}))
+        await ws.send(json.dumps({"t": "chat_reset"}))
+        _, done = await until(ws, "chat_done")
+        await asyncio.sleep(0.05)
+        check("chat_reset mid-turn cancels it and clears context",
+              done.get("cancelled") is True and assistant.history == [] and not assistant.busy, (done, assistant.history))
+
+        # --- disconnect mid-turn ---
+        be.scripts.append(["a"] * 10)
+        await ws.send(json.dumps({"t": "chat", "id": 10, "text": "x"}))
+        await asyncio.sleep(0.1)
+        await ws.close()
+        await asyncio.sleep(0.2)
+        check("disconnect mid-turn cancels it and frees the slot", not assistant.busy)
+
+        # --- replacing client cancels the old connection's turn ---
+        ws1, _ = await connect(PORT)
+        be.scripts.append(["a"] * 10)
+        await ws1.send(json.dumps({"t": "chat", "id": 11, "text": "x"}))
+        await asyncio.sleep(0.1)
+        ws2, _ = await connect(PORT)
+        await asyncio.sleep(0.2)
+        be.delay = 0
+        be.scripts.append(["ok"])
+        await ws2.send(json.dumps({"t": "chat", "id": 1, "text": "x"}))
+        _, m = await until(ws2, ("chat_done", "chat_error"))
+        check("new client can chat after replacing a mid-turn one", m["t"] == "chat_done", m)
+        await ws2.close()
+
+
+async def unit_tests():
+    # budget: persisted per day, enforced before the call
+    a, be = make(cap=150)
+    be.scripts += [["hi", {"in": 100, "out": 60}]]
+    assert a.claim()
+    await a.turn("x", lambda s: asyncio.sleep(0))
+    assert a.claim()
+    try:
+        await a.turn("x", lambda s: asyncio.sleep(0))
+        msg = None
+    except ai.ChatError as ex:
+        msg = str(ex)
+    check("daily cap -> 'Daily AI budget reached', no API call", msg == "Daily AI budget reached" and len(be.calls) == 1, msg)
+    b = ai.Assistant(a.cfg, FakeBackend(), usage_file=a.usage_file)
+    check("budget survives a restart", b._read_usage() == 160, b._read_usage())
+    check("slot released after a refused-by-budget turn", not a.busy)
+
+    # cancelled before the task ever ran: slot freed, chat_done still sent
+    a, be = make()
+    sent = []
+
+    async def send(m):
+        sent.append(m)
+    s = ai.ChatSession(a, send)
+    await s.handle({"t": "chat", "id": 1, "text": "x"})
+    await s.handle({"t": "chat_reset"})
+    await asyncio.sleep(0.05)
+    check("turn cancelled before it started: slot freed, chat_done sent",
+          not a.busy and sent == [{"t": "chat_done", "id": 1, "cancelled": True}], (a.busy, sent))
+
+    # trim: oldest half dropped, thinking stripped from what's left, starts with user
+    a, be = make(limit=2000)
+    for i in range(4):
+        be.scripts.append([f"r{i}", {"in": 500 if i < 3 else 2500}])
+        assert a.claim()
+        await a.turn(f"q{i}", lambda s: asyncio.sleep(0))
+    roles = [m["role"] for m in a.history]
+    thinking = [b for m in a.history if m["role"] == "assistant" for b in m["content"] if b["type"] == "thinking"]
+    check("trim halves context, starts on a user turn, strips thinking",
+          roles == ["user", "assistant"] * 2 and a.history[0]["content"] == "q2" and not thinking, a.history)
+
+    # config loading
+    p = TMP / "ai.toml"
+    p.write_text('api_key = "sk-test"\nmodel = "claude-haiku-5-5"\neffort = "bogus"\nmax_tokens = 2048\n')
+    p.chmod(0o644)
+    env = os.environ.pop("ANTHROPIC_API_KEY", None)
+    cfg = ai.load_config(p)
+    check("config: loads key, tightens mode to 600, ignores invalid effort",
+          cfg and cfg.api_key == "sk-test" and cfg.max_tokens == 2048 and cfg.effort == "low"
+          and (p.stat().st_mode & 0o777) == 0o600, (cfg, oct(p.stat().st_mode)))
+    check("config: no key anywhere -> chat off", ai.load_config(TMP / "missing.toml") is None)
+    os.environ["ANTHROPIC_API_KEY"] = "sk-env"
+    check("config: falls back to ANTHROPIC_API_KEY", ai.load_config(TMP / "missing.toml").api_key == "sk-env")
+    if env is None:
+        del os.environ["ANTHROPIC_API_KEY"]
+    else:
+        os.environ["ANTHROPIC_API_KEY"] = env
+
+
+async def main():
+    await server_tests()
+    await unit_tests()
+    print()
+    if failures:
+        print(f"{len(failures)} FAILED: {failures}")
+        sys.exit(1)
+    print("all tests passed")
+
+
+asyncio.run(main())

@@ -25,6 +25,7 @@ from pathlib import Path
 import websockets
 from evdev import UInput, ecodes as e
 
+import ai
 import keymap
 from clipboard import ClipboardPaste
 
@@ -35,6 +36,7 @@ TOKEN_FILE = CONFIG_DIR / "token"
 DEFAULT_PORT = 8765
 DEVICE_NAME = "companion-virtual-input"
 QUEUE_LIMIT = 1000  # pending input messages per connection before new ones are dropped
+CHAT_TYPES = {"chat", "chat_cancel", "chat_reset", "confirm"}
 MAX_PASTE_RUNS = 3  # a text message needing more separate pastes than this is pasted whole
 
 LETTERS = {c: getattr(e, f"KEY_{c.upper()}") for c in "abcdefghijklmnopqrstuvwxyz"}
@@ -276,10 +278,11 @@ def lan_ip() -> str:
 
 
 class Server:
-    def __init__(self, vin: VirtualInput, token: str, max_step: float):
+    def __init__(self, vin: VirtualInput, token: str, max_step: float, assistant: ai.Assistant = None):
         self.vin = vin
         self.token = token.encode()
         self.max_step = max_step
+        self.assistant = assistant  # None when no API key is configured
         self.active = None  # only one controlling client at a time
 
     async def handler(self, ws):
@@ -305,8 +308,19 @@ class Server:
                 pass
         self.active = ws
         await asyncio.to_thread(self.vin.refresh_keymap)
-        await ws.send(json.dumps({"t": "ok", "host": socket.gethostname()}))
+        ok = {"t": "ok", "host": socket.gethostname()}
+        if self.assistant:
+            ok.update(caps=["chat"], model=self.assistant.cfg.model)
+        await ws.send(json.dumps(ok))
         log.info("client connected: %s", peer)
+
+        async def send(msg: dict):
+            try:
+                await ws.send(json.dumps(msg))
+            except websockets.ConnectionClosed:
+                pass
+
+        chat = ai.ChatSession(self.assistant, send) if self.assistant else None
 
         # Input is applied in order by a worker so a paste (which awaits the clipboard)
         # never holds up reading the socket; pings are answered straight from the read loop.
@@ -319,6 +333,12 @@ class Server:
                     if m["t"] == "ping":
                         if isinstance(m.get("id"), int) and not isinstance(m["id"], bool):
                             await ws.send(json.dumps({"t": "pong", "id": m["id"]}))
+                    elif m["t"] in CHAT_TYPES:
+                        # chat runs in its own task; handle() only starts or cancels it
+                        if chat:
+                            await chat.handle(m)
+                        elif m["t"] == "chat":
+                            await send({"t": "chat_error", "id": m.get("id"), "msg": "AI isn't set up on this PC"})
                     else:
                         queue.put_nowait(m)
                 except asyncio.QueueFull:
@@ -328,6 +348,8 @@ class Server:
         except websockets.ConnectionClosed:
             pass
         finally:
+            if chat:
+                await chat.cancel()
             worker.cancel()
             try:
                 await worker
@@ -372,7 +394,11 @@ async def amain(args):
         else:
             log.warning("wl-copy/wl-paste or WAYLAND_DISPLAY missing: untypeable characters will be skipped")
     vin = VirtualInput(args.layout, paster)
-    srv = Server(vin, token, args.max_step)
+    cfg = ai.load_config()
+    assistant = ai.Assistant(cfg) if cfg else None
+    log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
+             f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
+    srv = Server(vin, token, args.max_step, assistant)
     ip = lan_ip()
     print(f"\nCompanion daemon listening on ws://{args.host}:{args.port}  (layout: {args.layout})")
     print(f"  LAN address : {ip}:{args.port}")

@@ -74,3 +74,15 @@ on logout.
 On KDE the unit also sets flat pointer acceleration for the virtual device only
 (`kcminputrc`, group `[Libinput][4660][22136][companion-virtual-input]`), so KWin doesn't
 apply its own acceleration on top of the app's.
+
+## AI chat (optional)
+
+Put an Anthropic API key in `~/.config/companion/ai.toml` (the daemon enforces mode 600)
+and restart the service. Other settings are documented at the top of `ai.py`:
+
+```toml
+api_key = "sk-ant-..."
+```
+
+With no key, the daemon doesn't advertise `chat` and the app hides the chat UI. The key
+never leaves the PC and is never logged. Set `daily_token_cap` to bound the spend.
