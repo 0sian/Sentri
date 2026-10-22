@@ -81,8 +81,9 @@ behaviour the spec leaves open. None of them adds a message or field:
 2. **History on cancel/error.** The API requires history to be append-only (on Haiku 5.5, editing earlier
    turns makes the replayed thinking blocks a 400). So a turn is committed to context only when it
    ends. Cancelled with some text streamed: the user message + the text so far are kept (marked
-   "[cancelled]"), so the model knows what it said. Cancelled before any text, error, or refusal:
-   the turn is dropped from context, as if it never happened.
+   "[cancelled]"), so the model knows what it said. Tool rounds that completed (call + result) are
+   always kept, even after an error or cancel, because those actions really happened; a tool call
+   whose result never arrived is dropped. Anything else from an errored or refused turn is dropped.
 3. **Context growth.** When a turn's input exceeds `history_token_limit` (default 30k), the oldest
    exchanges are dropped and thinking blocks are stripped from what's left (that's the only
    edit the API allows). One cache miss, no error. `chat_reset` is still the normal way to clear.
