@@ -277,9 +277,31 @@ def lan_ip() -> str:
         s.close()
 
 
-class Server:
-    def __init__(self, vin: VirtualInput, token: str, max_step: float, assistant: ai.Assistant = None):
+class ToolInput:
+    """Keyboard access for the AI's type_text / press_keys tools. Shares the input lock with
+    the phone's input worker, so tool typing never interleaves with a phone message."""
+
+    def __init__(self, vin: VirtualInput, lock: asyncio.Lock):
         self.vin = vin
+        self.lock = lock
+
+    def valid_key(self, name: str) -> bool:
+        return resolve_key(name) is not None
+
+    async def type(self, s: str):
+        async with self.lock:
+            await self.vin.text(s)
+
+    async def keys(self, key: str, mods):
+        async with self.lock:
+            self.vin.key(key, mods)
+
+
+class Server:
+    def __init__(self, vin: VirtualInput, token: str, max_step: float, assistant: ai.Assistant = None,
+                 input_lock: asyncio.Lock = None):
+        self.vin = vin
+        self.input_lock = input_lock or asyncio.Lock()
         self.token = token.encode()
         self.max_step = max_step
         self.assistant = assistant  # None when no API key is configured
@@ -364,7 +386,8 @@ class Server:
         while True:
             m = await queue.get()
             try:
-                await self.dispatch(m)
+                async with self.input_lock:
+                    await self.dispatch(m)
             except (KeyError, TypeError, ValueError) as ex:
                 log.debug("bad message %r: %s", m, ex)
 
@@ -395,10 +418,11 @@ async def amain(args):
             log.warning("wl-copy/wl-paste or WAYLAND_DISPLAY missing: untypeable characters will be skipped")
     vin = VirtualInput(args.layout, paster)
     cfg = ai.load_config()
-    assistant = ai.Assistant(cfg) if cfg else None
+    input_lock = asyncio.Lock()
+    assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock)) if cfg else None
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
-    srv = Server(vin, token, args.max_step, assistant)
+    srv = Server(vin, token, args.max_step, assistant, input_lock)
     ip = lan_ip()
     print(f"\nCompanion daemon listening on ws://{args.host}:{args.port}  (layout: {args.layout})")
     print(f"  LAN address : {ip}:{args.port}")

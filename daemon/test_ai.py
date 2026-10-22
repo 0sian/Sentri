@@ -94,6 +94,14 @@ class FakeTool(pc_tools.Tool):
         return f"ran {a['n']}"
 
 
+class GatedTool(FakeTool):
+    name = "gated"
+    risk = "low"
+
+    def summary(self, a):
+        return f"Gated thing {a['n']}"
+
+
 def tool_use(n, uid="tu1", name="fake"):
     return {"type": "tool_use", "id": uid, "name": name, "input": {"n": n}}
 
@@ -328,7 +336,7 @@ async def tool_tests():
         check("tool event fields + call id", ev["id"] == 1 and ev["name"] == "fake" and ev["call"].startswith("c")
               and got[2]["call"] == ev["call"], ev)
         check("summary stripped of control chars and length-limited",
-              ev["summary"].startswith("Fake [31m3") and len(ev["summary"]) <= 120
+              ev["summary"].startswith("Fake [31m3") and len(ev["summary"]) <= 200
               and "\x1b" not in ev["summary"] and "\u202e" not in ev["summary"], ev["summary"])
         check("tool ran with validated args", tool.runs == [3], tool.runs)
         check("usage summed over rounds", done["usage"] == {"in": 1100, "out": 35}, done)
@@ -474,11 +482,95 @@ async def mood_tests():
         await ws.close()
 
 
+async def confirm_tests():
+    gated = GatedTool()
+    assistant, be = make(tool=gated)
+    srv = cd.Server(cd.VirtualInput("us"), TOKEN, 400.0, assistant)
+
+    def script(n):
+        be.scripts.extend([["", {"content": [tool_use(n, name="gated")], "stop": "tool_use"}], ["ok"]])
+
+    async with websockets.serve(srv.handler, "127.0.0.1", PORT + 4):
+        ws, _ = await connect(PORT + 4)
+
+        # allow
+        script(1)
+        await ws.send(json.dumps({"t": "chat", "id": 1, "text": "x"}))
+        _, req = await until(ws, "confirm_req")
+        check("confirm_req carries id, call, name, summary, risk, timeout",
+              req["id"] == 1 and req["name"] == "gated" and req["summary"] == "Gated thing 1"
+              and req["risk"] == "low" and req["timeout"] == 60 and req["call"].startswith("c"), req)
+        check("nothing runs before the answer", gated.runs == [])
+        await ws.send(json.dumps({"t": "confirm", "call": req["call"], "allow": True}))
+        got, _ = await until(ws, "chat_done")
+        states = [m["state"] for m in got if m["t"] == "tool" and m["call"] == req["call"]]
+        check("allow -> running, ok; tool ran", states == ["running", "ok"] and gated.runs == [1], (states, gated.runs))
+
+        # deny, and a truthy-but-not-true allow, both deny
+        for label, allow in (("explicit deny", False), ('"allow":"true" (not a JSON true)', "true"), ("allow: 1", 1)):
+            script(2)
+            await ws.send(json.dumps({"t": "chat", "id": 2, "text": "x"}))
+            _, req = await until(ws, "confirm_req")
+            await ws.send(json.dumps({"t": "confirm", "call": req["call"], "allow": allow}))
+            got, _ = await until(ws, "chat_done")
+            ev = [m for m in got if m["t"] == "tool"]
+            res = be.calls[-1][1][-1]["content"][0]
+            check(f"{label} -> tool denied/user, not run, model told",
+                  [(m["state"], m.get("detail")) for m in ev] == [("denied", "user")] and gated.runs == [1]
+                  and res["is_error"] and "declined" in res["content"], (ev, res))
+
+        # timeout -> denied/timeout
+        assistant.cfg.confirm_timeout = 0.3
+        script(3)
+        await ws.send(json.dumps({"t": "chat", "id": 3, "text": "x"}))
+        _, req = await until(ws, "confirm_req")
+        got, _ = await until(ws, "chat_done")
+        ev = [(m["state"], m.get("detail")) for m in got if m["t"] == "tool"]
+        check("no answer -> denied/timeout, not run", ev == [("denied", "timeout")] and gated.runs == [1], ev)
+        assistant.cfg.confirm_timeout = 60
+
+        # stray confirm for an unknown call is ignored
+        await ws.send(json.dumps({"t": "confirm", "call": "c999999", "allow": True}))
+        await ws.send(json.dumps({"t": "ping", "id": 5}))
+        _, m = await until(ws, "pong")
+        check("confirm for an unknown call is ignored", m["id"] == 5)
+
+        # chat_cancel while the card is up -> denied event, chat_done cancelled, never runs
+        be.scripts.append(["", {"content": [tool_use(4, name="gated")], "stop": "tool_use"}])
+        await ws.send(json.dumps({"t": "chat", "id": 4, "text": "x"}))
+        _, req = await until(ws, "confirm_req")
+        await ws.send(json.dumps({"t": "chat_cancel", "id": 4}))
+        got, done = await until(ws, "chat_done")
+        ev = [(m["state"], m.get("detail")) for m in got if m["t"] == "tool"]
+        await ws.send(json.dumps({"t": "confirm", "call": req["call"], "allow": True}))  # too late
+        await asyncio.sleep(0.1)
+        check("cancel with a card up -> denied, cancelled, late Allow does nothing",
+              ev == [("denied", "user")] and done.get("cancelled") and gated.runs == [1], (ev, done, gated.runs))
+
+        # disconnect while the card is up -> never runs, slot freed
+        be.scripts.append(["", {"content": [tool_use(5, name="gated")], "stop": "tool_use"}])
+        await ws.send(json.dumps({"t": "chat", "id": 5, "text": "x"}))
+        await until(ws, "confirm_req")
+        await ws.close()
+        await asyncio.sleep(0.2)
+        check("disconnect with a card up -> denied, never runs, slot freed",
+              gated.runs == [1] and not assistant.busy, (gated.runs, assistant.busy))
+
+    # no confirm callback at all (e.g. a future non-phone caller): deny
+    gated = GatedTool()
+    a, be = make(tool=gated)
+    be.scripts += [["", {"content": [tool_use(1, name="gated")], "stop": "tool_use"}], ["no"]]
+    assert a.claim()
+    await a.turn("x", lambda s: asyncio.sleep(0), lambda e_: asyncio.sleep(0))
+    check("no confirm channel -> denied by default", gated.runs == [])
+
+
 async def main():
     await server_tests()
     await unit_tests()
     await tool_tests()
     await mood_tests()
+    await confirm_tests()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")

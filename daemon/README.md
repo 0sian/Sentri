@@ -86,3 +86,16 @@ api_key = "sk-ant-..."
 
 With no key, the daemon doesn't advertise `chat` and the app hides the chat UI. The key
 never leaves the PC and is never logged. Set `daily_token_cap` to bound the spend.
+
+Things the AI does that you might not want (typing, closing windows, opening links,
+screenshots, reading the clipboard, running your saved commands) always show an
+Allow/Deny card on the phone first, and no answer means no. To give it a few safe
+commands, list them in `ai.toml`; it can only pick a name, never add arguments:
+
+```toml
+open_url_allow = ["youtube.com"]   # links to these open without a card
+
+[commands.updates]
+description = "Check for package updates"
+argv = ["checkupdates"]
+```

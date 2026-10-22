@@ -101,3 +101,17 @@ behaviour the spec leaves open. None of them adds a message or field:
    `chat_mood`. The tag never appears in `chat_delta` or anything the phone shows. It *is* kept in the
    model-side context: stripping it would mean editing the model's own output before re-sending it
    (the history-editing check), and without seeing its earlier tags the model tends to stop using them.
+8. **Confirm-gated tools (Phase C).** `risk` low: `type_text` (max 300 chars), `press_keys` (one combo
+   per call), `close_window`, `open_url`. `risk` high: `screenshot`, `read_clipboard`,
+   `run_named_command`. Behaviour the phone can rely on:
+   - Only a JSON `true` in `confirm.allow` allows; anything else (false, "true", 1, missing) is a deny.
+   - `summary` is at most 200 chars, built from validated args. `type_text` shows Enter/Tab as ⏎/⇥
+     (they can run commands in a terminal) and names the focused app; if focus has moved by the
+     time Allow arrives, nothing is typed and the tool reports `error`.
+   - `open_url` shows the host as punycode when it has non-ASCII characters (look-alike domains).
+     It skips the card only for hosts on Osian's `open_url_allow` list (and their subdomains);
+     IP addresses always ask.
+   - `run_named_command` runs only commands from Osian's `ai.toml`. The model picks a name; it
+     can't add arguments.
+   - Cancel/reset/disconnect with a card up: the card resolves as `tool` `denied`/`user` (if the
+     socket is still open) and the turn ends `cancelled`. A late `confirm` for that call is ignored.

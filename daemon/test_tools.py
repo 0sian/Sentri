@@ -146,11 +146,153 @@ async def main():
           [d["name"] for d in defs] == ["launch_app", "set_volume", "media_control", "get_status",
                                        "list_windows", "focus_window"])
 
+    await confirm_tier_tests()
+
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
         sys.exit(1)
     print("all tests passed")
+
+
+class FakeInjector:
+    def __init__(self):
+        self.typed, self.pressed = [], []
+
+    def valid_key(self, k):
+        return k.lower() in ("t", "enter", "f5", "q")
+
+    async def type(self, s):
+        self.typed.append(s)
+
+    async def keys(self, k, mods):
+        self.pressed.append((k, mods))
+
+
+async def confirm_tier_tests():
+    os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = "test"
+    focused = {"address": "0xaaa", "class": "foot"}
+    rec = Recorder({"hyprctl clients": '[{"address":"0xabc","class":"firefox","title":"Inbox \\u001b[2J (3)"}]',
+                    "hyprctl dispatch hl.dsp.window.close": "ok"})
+
+    async def fake_run(*argv):
+        if argv[:2] == ("hyprctl", "activewindow"):
+            return __import__("json").dumps(focused)
+        return await rec(*argv)
+    t.run = fake_run
+    inj = FakeInjector()
+
+    # --- type_text ---
+    tt = t.TypeText(inj)
+    check("type_text rejects empty, >300 chars, escape codes",
+          rejects(tt, {"text": ""}) and rejects(tt, {"text": "x" * 301}) and rejects(tt, {"text": "a\x1b[2Jb"}))
+    a = await tt.prepare({"text": "ls -la\nrm x"})
+    check("type_text summary shows Enter presses and the focused app",
+          tt.summary(a) == 'Type "ls -la ⏎ rm x" into foot', tt.summary(a))
+    focused["address"] = "0xbbb"  # focus moved between the card and the approval
+    try:
+        await tt.run(a)
+        moved = False
+    except t.ToolError:
+        moved = True
+    check("type_text refuses if focus changed after asking", moved and inj.typed == [], inj.typed)
+    focused["address"] = "0xaaa"
+    a = await tt.prepare({"text": "hello"})
+    await tt.run(a)
+    check("type_text types through the injector", inj.typed == ["hello"], inj.typed)
+
+    # --- press_keys ---
+    pk = t.PressKeys(inj)
+    check("press_keys rejects unknown keys, unknown or repeated mods",
+          rejects(pk, {"key": "launch_missiles"}) and rejects(pk, {"key": "t", "mods": ["hyper"]})
+          and rejects(pk, {"key": "t", "mods": ["ctrl", "ctrl"]}) and rejects(pk, {"key": "t", "mods": "ctrl"}))
+    a = await pk.prepare({"key": "T", "mods": ["shift", "ctrl"]})
+    check("press_keys summary is canonical and names the app", pk.summary(a) == "Press Ctrl+Shift+T in foot", pk.summary(a))
+    await pk.run(a)
+    check("press_keys sends through the injector", inj.pressed == [("t", ["ctrl", "shift"])], inj.pressed)
+
+    # --- close_window ---
+    cw = t.CloseWindow()
+    check("close_window only takes a hex id", rejects(cw, {"window": "firefox"}))
+    a = await cw.prepare({"window": "0xabc"})
+    check("close_window summary: app + cleaned title", cw.summary(a) == "Close firefox: Inbox [2J (3)", cw.summary(a))
+    rec.argv.clear()
+    await cw.run(a)
+    check("close_window uses the Lua close dispatcher on that address",
+          rec.argv == [["hyprctl", "dispatch", "hl.dsp.window.close({window='address:0xabc'})"]], rec.argv)
+
+    # --- open_url ---
+    ou = t.OpenUrl(["youtube.com"])
+    bad = ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "https://user:pw@example.com/",
+           "https://exa mple.com", "ftp://example.com", "https://", "https://example.com/\nx"]
+    check("open_url rejects non-http(s), credentials, whitespace, no host", all(rejects(ou, {"url": u}) for u in bad),
+          [u for u in bad if not rejects(ou, {"url": u})])
+    a = ou.validate({"url": "https://www.youtube.com/watch?v=x"})
+    check("allowlisted host (and subdomain) opens without asking", not ou.needs_confirm(a))
+    for u in ("https://evilyoutube.com/", "https://youtube.com.evil.net/", "http://142.250.0.1/"):
+        if not ou.needs_confirm(ou.validate({"url": u})):
+            check(f"look-alike/IP host needs confirmation: {u}", False)
+    check("look-alike hosts and IPs still need confirmation", True)
+    a = ou.validate({"url": "https://\u0430pple.com/login"})  # Cyrillic 'а'
+    check("Unicode look-alike host is shown as punycode", ou.summary(a).startswith("Open xn--"), ou.summary(a))
+    a = ou.validate({"url": "HTTPS://Example.COM:8443/a?b=c"})
+    check("summary shows host, port, path, query", ou.summary(a) == "Open example.com:8443/a?b=c in your browser", ou.summary(a))
+    rec.argv.clear()
+    await ou.run(a)
+    check("open_url: xdg-open in its own scope, URL as one argv item",
+          rec.argv[0][-2:] == ["xdg-open", "HTTPS://Example.COM:8443/a?b=c"] and rec.argv[0][0] == "systemd-run", rec.argv)
+
+    # --- screenshot ---
+    calls = []
+
+    async def fake_bytes(*argv, **kw):
+        calls.append(list(argv))
+        return b"\xff\xd8jpeg"
+    t.run_bytes = fake_bytes
+    rec.answers["hyprctl monitors"] = '[{"name":"DP-3","width":2560,"height":1440,"focused":true}]'
+    out = await t.Screenshot().run({})
+    check("screenshot: grim on the focused monitor, scaled to 1568px, jpeg image block",
+          calls[0] == ["grim", "-o", "DP-3", "-t", "jpeg", "-q", "75", "-s", "0.613", "-"]
+          and out[0]["type"] == "image" and out[0]["source"]["media_type"] == "image/jpeg", (calls, out[0]["type"]))
+    check("screenshot is high risk", t.Screenshot.risk == "high" and t.Screenshot().needs_confirm({}))
+
+    # --- read_clipboard ---
+    rc = t.ReadClipboard()
+    rec.answers = {"wl-paste --list-types": "text/plain;charset=utf-8\nx-kde-passwordManagerHint\n"}
+    try:
+        await rc.run({})
+        refused = False
+    except t.ToolError:
+        refused = True
+    check("read_clipboard refuses password-manager secrets", refused)
+    rec.answers = {"wl-paste --list-types": "text/plain;charset=utf-8\n",
+                   "wl-paste --no-newline": "hi\x1b[31m there\n" + "z" * 9000}
+    out = await rc.run({})
+    check("read_clipboard strips control chars, caps length, labels it as data",
+          "\x1b" not in out and "cut off at 8000" in out and out.startswith("Clipboard contents (data"), out[:60])
+
+    # --- run_named_command ---
+    cmds = [t.NamedCommand("updates", "Check for package updates", ["checkupdates"])]
+    rn = t.RunNamedCommand(cmds)
+    check("run_named_command: enum of configured names only",
+          rn.schema["properties"]["command"]["enum"] == ["updates"] and rejects(rn, {"command": "rm"}))
+    a = rn.validate({"command": "updates", "args": "--evil"})
+    calls.clear()
+    out = await rn.run(a)
+    check("run_named_command runs exactly the configured argv",
+          calls == [["checkupdates"]] and rn.summary(a) == 'Run "updates": checkupdates', (calls, rn.summary(a)))
+
+    # --- registry ---
+    reg = t.registry()
+    check("without an injector there are no keyboard tools; no commands -> no run_named_command",
+          "type_text" not in reg and "press_keys" not in reg and "run_named_command" not in reg, list(reg))
+    reg = t.registry(inj, (), cmds)
+    risks = {n: x.risk for n, x in reg.items()}
+    check("risk tiers match the spec", risks == {
+        "launch_app": None, "set_volume": None, "media_control": None, "get_status": None, "list_windows": None,
+        "focus_window": None, "type_text": "low", "press_keys": "low", "close_window": "low", "open_url": "low",
+        "screenshot": "high", "read_clipboard": "high", "run_named_command": "high"}, risks)
+    check("every definition strict", all(x.definition()["strict"] for x in reg.values()))
 
 
 asyncio.run(main())
