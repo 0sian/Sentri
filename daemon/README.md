@@ -115,3 +115,13 @@ steps = [
 Bad routines are skipped at startup with a line in `journalctl --user -u companion`.
 Things you ask it to remember go in `~/.local/share/companion/memory.toml`, which you can
 edit by hand. It refuses anything that looks like a password or key.
+
+To let it read your homelab's stats (read-only, via Glances' web API, `glances -w`):
+
+```toml
+[homelab]
+url = "http://192.168.1.10:61208"
+api = "/api/4"        # "/api/3" if the homelab runs Glances 3
+# user = "..."        # only if Glances was started with --password
+# password = "..."
+```

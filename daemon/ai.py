@@ -19,6 +19,12 @@ ANTHROPIC_API_KEY. It is never logged and never sent to the phone.
     description = "Check for package updates"
     argv = ["checkupdates"]
 
+    [homelab]                       # homelab_stats via Glances' REST API (read-only)
+    url = "http://192.168.1.10:61208"
+    api = "/api/4"                  # "/api/3" for Glances 3.x
+    user = ""                       # only if Glances runs with --password
+    password = ""
+
     [routines.work]                 # run_routine: steps use the tools' own arguments
     description = "Start work: browser, editor, quiet volume"
     steps = [
@@ -37,6 +43,7 @@ import stat
 import itertools
 import re
 import tomllib
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -84,7 +91,8 @@ sets the cloud's expression. Never react to him declining something with a negat
 
 What you can do on the PC, with your tools:
 - Straight away: open installed apps, change or mute the volume, play, pause or skip media, \
-check the time, volume, what's playing and the focused window, list and switch windows.
+check the time, volume, what's playing and the focused window, list and switch windows, and \
+(if set up) check the homelab server's stats. You can't restart anything on the homelab.
 - Only with his approval: type text, press keys, close windows, open links, take a screenshot, \
 read his clipboard, run his saved commands. Calling the tool shows him an Allow/Deny card on \
 his phone, so don't ask in chat first; the card is the question. If he declines or doesn't \
@@ -122,6 +130,7 @@ class AIConfig:
     open_url_allow: list = dataclasses.field(default_factory=list)
     commands: list = dataclasses.field(default_factory=list)  # [pc_tools.NamedCommand]
     routines: dict = dataclasses.field(default_factory=dict)  # raw tables; validated in pc_tools.load_routines
+    homelab: pc_tools.Glances = None
 
 
 def load_config(path: Path = AI_CONFIG):
@@ -166,6 +175,14 @@ def load_config(path: Path = AI_CONFIG):
             log.error("ai.toml: ignoring command %r (needs a lowercase name and an argv list of strings)", name)
     if isinstance(data.get("routines"), dict):
         cfg.routines = data["routines"]
+    h = data.get("homelab")
+    if isinstance(h, dict):
+        u = urllib.parse.urlsplit(str(h.get("url", "")))
+        api = str(h.get("api", "/api/4"))
+        if u.scheme in ("http", "https") and u.hostname and re.fullmatch(r"/api/\d", api):
+            cfg.homelab = pc_tools.Glances(str(h["url"]), api, str(h.get("user", "")), str(h.get("password", "")))
+        else:
+            log.error("ai.toml: ignoring [homelab]: needs url = \"http://host:61208\" and api = \"/api/4\" or \"/api/3\"")
     return cfg
 
 
@@ -291,7 +308,7 @@ class Assistant:
         self.tainted = False
         if tools is None:
             tools = pc_tools.registry(injector, cfg.open_url_allow, cfg.commands, cfg.routines,
-                                      store, lambda: self.tainted)
+                                      store, lambda: self.tainted, cfg.homelab)
         self.tools = tools
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
         routines = self.tools.get("run_routine")

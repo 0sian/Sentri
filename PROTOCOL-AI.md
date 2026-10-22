@@ -136,3 +136,10 @@ behaviour the spec leaves open. None of them adds a message or field:
    - **Taint lasts for the conversation, not just the turn**: untrusted text stays in context after
      the turn that read it. Taint is set by get_status, list_windows, screenshot, read_clipboard,
      run_named_command (and routines containing those); it clears on `chat_reset`.
+11. **homelab_stats(section)** (auto, untrusted for taint). Sections: cpu mem load fs network sensors
+   containers uptime. URL, API prefix (default `/api/4`) and optional basic auth come only from
+   `[homelab]` in ai.toml. GET only, 4 s timeout, 512 KB cap, redirects refused. A 404 is reported
+   as "set api = /api/3" so a wrong prefix is obvious (the containers section falls back to the
+   Glances 3 `docker` plugin first). Output is reduced to a few lines, and container, mount and
+   sensor names are cleaned like window titles. Unreachable homelab means a clean tool error. No
+   restart/write tools.
