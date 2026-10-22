@@ -14,6 +14,7 @@ from evdev import ecodes as e
 
 import ai
 import companion_daemon as cd
+import pc_tools
 
 
 class FakeUInput:
@@ -53,8 +54,9 @@ class FakeBackend:
         self.calls = []        # (system, messages) per call
         self.delay = 0.0       # seconds between deltas
 
-    async def complete(self, system, messages, on_text):
+    async def complete(self, system, messages, on_text, tools):
         self.calls.append((system, [dict(m) for m in messages]))
+        self.tools = tools
         script = self.scripts.pop(0)
         if isinstance(script, Exception):
             raise script
@@ -68,10 +70,40 @@ class FakeBackend:
         return ai.Reply(content, over.get("stop", "end_turn"), over.get("in", 100), over.get("out", 20))
 
 
-def make(cap=0, limit=30000):
+class FakeTool(pc_tools.Tool):
+    """Records runs instead of touching the PC."""
+    name = "fake"
+    description = "test tool"
+    schema = pc_tools._schema({"n": {"type": "integer"}}, ["n"])
+    fallback_summary = "Do the fake thing"
+
+    def __init__(self, delay=0.0, fail=False):
+        self.runs, self.delay, self.fail = [], delay, fail
+
+    def validate(self, args):
+        return {"n": pc_tools._int(args.get("n"), 0, 9, "n")}
+
+    def summary(self, a):
+        return f"Fake \x1b[31m{a['n']}\u202e" + "x" * 200  # control chars + overlong: must be cleaned
+
+    async def run(self, a):
+        await asyncio.sleep(self.delay)
+        if self.fail:
+            raise pc_tools.ToolError("fake failure")
+        self.runs.append(a["n"])
+        return f"ran {a['n']}"
+
+
+def tool_use(n, uid="tu1", name="fake"):
+    return {"type": "tool_use", "id": uid, "name": name, "input": {"n": n}}
+
+
+def make(cap=0, limit=30000, tool=None):
     cfg = ai.AIConfig(api_key="k", daily_token_cap=cap, history_token_limit=limit)
     backend = FakeBackend()
-    return ai.Assistant(cfg, backend, usage_file=TMP / f"usage-{os.urandom(4).hex()}.json"), backend
+    tool = tool or FakeTool()
+    return ai.Assistant(cfg, backend, usage_file=TMP / f"usage-{os.urandom(4).hex()}.json",
+                        tools={tool.name: tool}), backend
 
 
 async def connect(port):
@@ -273,9 +305,118 @@ async def unit_tests():
         os.environ["ANTHROPIC_API_KEY"] = env
 
 
+async def tool_tests():
+    async def nothing(_):
+        pass
+
+    # one tool round over the socket: events, summary cleaned, usage summed, results fed back
+    tool = FakeTool()
+    assistant, be = make(tool=tool)
+    srv = cd.Server(cd.VirtualInput("us"), TOKEN, 400.0, assistant)
+    async with websockets.serve(srv.handler, "127.0.0.1", PORT + 2):
+        ws, _ = await connect(PORT + 2)
+        be.scripts += [["On it. ", {"content": [{"type": "text", "text": "On it. "}, tool_use(3)],
+                                    "stop": "tool_use", "in": 500, "out": 30}],
+                       ["Done.", {"in": 600, "out": 5}]]
+        await ws.send(json.dumps({"t": "chat", "id": 1, "text": "do it"}))
+        got, done = await until(ws, "chat_done")
+        kinds = [(m["t"], m.get("state")) for m in got]
+        check("tool turn: delta, tool running, tool ok, delta, done",
+              kinds == [("chat_delta", None), ("tool", "running"), ("tool", "ok"), ("chat_delta", None),
+                        ("chat_done", None)], kinds)
+        ev = got[1]
+        check("tool event fields + call id", ev["id"] == 1 and ev["name"] == "fake" and ev["call"].startswith("c")
+              and got[2]["call"] == ev["call"], ev)
+        check("summary stripped of control chars and length-limited",
+              ev["summary"].startswith("Fake [31m3") and len(ev["summary"]) <= 120
+              and "\x1b" not in ev["summary"] and "\u202e" not in ev["summary"], ev["summary"])
+        check("tool ran with validated args", tool.runs == [3], tool.runs)
+        check("usage summed over rounds", done["usage"] == {"in": 1100, "out": 35}, done)
+        sent = be.calls[1][1]
+        check("round 2 sends tool_use + tool_result",
+              sent[-2]["content"][1]["type"] == "tool_use"
+              and sent[-1]["content"] == [{"type": "tool_result", "tool_use_id": "tu1", "content": "ran 3"}], sent[-2:])
+        check("tool definitions passed, strict", be.tools == [assistant.tools["fake"].definition()]
+              and be.tools[0]["strict"] is True, be.tools)
+        check("history: user, tool round, final reply", [m["role"] for m in assistant.history] ==
+              ["user", "assistant", "user", "assistant"], assistant.history)
+
+        # bad args: error event with the fallback summary, is_error result, tool not run
+        be.scripts += [["", {"content": [tool_use(42)], "stop": "tool_use"}], ["Couldn't."]]
+        await ws.send(json.dumps({"t": "chat", "id": 2, "text": "x"}))
+        got, _ = await until(ws, "chat_done")
+        evs = [m for m in got if m["t"] == "tool"]
+        res = be.calls[-1][1][-1]["content"][0]
+        check("invalid args -> tool error event, fallback summary, is_error result",
+              [e_["state"] for e_ in evs] == ["error"] and evs[0]["summary"] == "Do the fake thing"
+              and res["is_error"] is True and tool.runs == [3], (evs, res))
+        check("call ids never reused", evs[0]["call"] != ev["call"])
+
+        # unknown tool name: is_error result, no event
+        be.scripts += [["", {"content": [tool_use(1, name="rm_rf")], "stop": "tool_use"}], ["No."]]
+        await ws.send(json.dumps({"t": "chat", "id": 3, "text": "x"}))
+        got, _ = await until(ws, "chat_done")
+        res = be.calls[-1][1][-1]["content"][0]
+        check("unknown tool -> is_error result, nothing shown", res["is_error"] and not [m for m in got if m["t"] == "tool"], res)
+        await ws.close()
+
+    # round cap
+    assistant, be = make()
+    be.scripts += [["", {"content": [tool_use(1, f"t{i}")], "stop": "tool_use"}] for i in range(ai.MAX_TOOL_ROUNDS + 1)]
+    assert assistant.claim()
+    try:
+        await assistant.turn("x", nothing, nothing)
+        msg = None
+    except ai.ChatError as ex:
+        msg = str(ex)
+    check("stops after MAX_TOOL_ROUNDS with chat_error, keeps completed rounds",
+          msg and "too many steps" in msg and len(be.calls) == ai.MAX_TOOL_ROUNDS + 1
+          and len(assistant.history) == 1 + 2 * ai.MAX_TOOL_ROUNDS, (msg, len(be.calls), len(assistant.history)))
+
+    # cancel while a tool is running: no dangling tool_use in history
+    assistant, be = make(tool=FakeTool(delay=1.0))
+    be.scripts += [["Opening. ", {"content": [{"type": "text", "text": "Opening. "}, tool_use(1)], "stop": "tool_use"}]]
+    assert assistant.claim()
+    task = asyncio.create_task(assistant.turn("x", nothing, nothing))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    h = assistant.history
+    check("cancel mid-tool: only shown text kept, no unanswered tool_use",
+          [m["role"] for m in h] == ["user", "assistant"] and h[1]["content"][0]["text"] == "Opening.  [cancelled]"
+          and not assistant.busy, h)
+
+    # API error in round 2: the completed round stays (the tool really ran)
+    assistant, be = make()
+    be.scripts += [["", {"content": [tool_use(2)], "stop": "tool_use"}], ai.ChatError("Can't reach the AI service.")]
+    assert assistant.claim()
+    try:
+        await assistant.turn("x", nothing, nothing)
+    except ai.ChatError:
+        pass
+    check("error after a tool round keeps that round", [m["role"] for m in assistant.history] == ["user", "assistant", "user"],
+          assistant.history)
+
+    # max_tokens with a tool_use: not run, not committed
+    tool = FakeTool()
+    assistant, be = make(tool=tool)
+    be.scripts += [["", {"content": [tool_use(1)], "stop": "max_tokens"}]]
+    assert assistant.claim()
+    try:
+        await assistant.turn("x", nothing, nothing)
+        msg = None
+    except ai.ChatError as ex:
+        msg = str(ex)
+    check("truncated tool call is not run", msg and tool.runs == [] and assistant.history == [], (msg, tool.runs))
+
+
 async def main():
     await server_tests()
     await unit_tests()
+    await tool_tests()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
