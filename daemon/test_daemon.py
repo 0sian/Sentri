@@ -29,6 +29,23 @@ class FakeUInput:
 
 cd.UInput = FakeUInput  # monkeypatch before VirtualInput is built
 
+
+class FakePaster:
+    """Records what would be pasted instead of touching the real clipboard."""
+    def __init__(self):
+        self.log = []
+
+    async def snapshot(self):
+        self.log.append("snapshot")
+        return {"saved": True}
+
+    async def paste(self, text, tap):
+        self.log.append(("paste", text))
+        tap(e.KEY_INSERT, [e.KEY_LEFTSHIFT])
+
+    async def restore(self, saved):
+        self.log.append(("restore", saved))
+
 TOKEN = "test-token"
 PORT = 18765
 failures = []
@@ -92,6 +109,14 @@ async def main():
         check("one notch scroll emits hi-res 120 + legacy 1",
               (e.EV_REL, e.REL_WHEEL_HI_RES, 120) in vin.ui.events and (e.EV_REL, e.REL_WHEEL, 1) in vin.ui.events, vin.ui.events)
 
+        vin.ui.events.clear()
+        for _ in range(4):
+            await ws.send(json.dumps({"t": "sc", "dx": 0, "dy": -0.25}))
+        await asyncio.sleep(0.05)
+        hi = sum(v for t, c, v in vin.ui.events if c == e.REL_WHEEL_HI_RES)
+        lo = [v for t, c, v in vin.ui.events if c == e.REL_WHEEL]
+        check("4 quarter notches -> hi-res -120 total + exactly one legacy -1", hi == -120 and lo == [-1], vin.ui.events)
+
         # --- text on UK layout ---
         vin.ui.events.clear()
         await ws.send(json.dumps({"t": "text", "s": 'A@"£#'}))
@@ -152,11 +177,62 @@ async def main():
         check("second client replaces first", replaced)
         await ws2.close()
 
+    await keymap_tests()
+
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
         sys.exit(1)
     print("all tests passed")
+
+
+def keys_down(vin):
+    return [c for t, c, v in vin.ui.events if t == e.EV_KEY and v == 1]
+
+
+async def keymap_tests():
+    us = cd.VirtualInput("us")
+    await us.text('@"#\\')
+    check("US layout maps @ \" # \\",
+          keys_down(us) == [e.KEY_LEFTSHIFT, e.KEY_2, e.KEY_LEFTSHIFT, e.KEY_APOSTROPHE,
+                            e.KEY_LEFTSHIFT, e.KEY_3, e.KEY_BACKSLASH], keys_down(us))
+
+    uk = cd.VirtualInput("uk")
+    await uk.text("\\|€")
+    check("UK layout: \\ | on the ISO key, € on AltGr+4",
+          keys_down(uk) == [e.KEY_102ND, e.KEY_LEFTSHIFT, e.KEY_102ND, e.KEY_RIGHTALT, e.KEY_4], keys_down(uk))
+
+    # no paster: untypeable characters are dropped, the rest still typed
+    uk.ui.events.clear()
+    await uk.text("aŵb")
+    check("untypeable chars skipped without a paster", keys_down(uk) == [e.KEY_A, e.KEY_B], keys_down(uk))
+
+    fp = FakePaster()
+    cy = cd.VirtualInput("uk", fp)
+    await cy.text("aŵŷbô")
+    check("untypeable runs pasted with Shift+Insert, in order",
+          keys_down(cy) == [e.KEY_A, e.KEY_LEFTSHIFT, e.KEY_INSERT, e.KEY_B, e.KEY_LEFTSHIFT, e.KEY_INSERT],
+          keys_down(cy))
+    check("clipboard snapshotted once and restored once",
+          fp.log == ["snapshot", ("paste", "ŵŷ"), ("paste", "ô"), ("restore", {"saved": True})], fp.log)
+
+    fp.log.clear()
+    await cy.text("plain")
+    check("clipboard untouched when everything is typeable", fp.log == [], fp.log)
+
+    # auto layout re-detects on refresh (i.e. on every connect)
+    detected = [({"layout": "us"}, 0, "test"), ({"layout": "gb"}, 0, "test")]
+    real_detect = cd.keymap.detect
+    cd.keymap.detect = lambda name: detected.pop(0)
+    try:
+        auto = cd.VirtualInput("auto")
+        at_us = auto.charmap["@"]
+        auto.refresh_keymap()
+        at_gb = auto.charmap["@"]
+    finally:
+        cd.keymap.detect = real_detect
+    check("auto layout follows re-detection", at_us == (e.KEY_2, True, False) and at_gb == (e.KEY_APOSTROPHE, True, False),
+          (at_us, at_gb))
 
 
 asyncio.run(main())

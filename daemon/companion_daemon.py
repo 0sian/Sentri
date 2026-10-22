@@ -25,63 +25,18 @@ from pathlib import Path
 import websockets
 from evdev import UInput, ecodes as e
 
+import keymap
+from clipboard import ClipboardPaste
+
 log = logging.getLogger("companion")
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "companion"
 TOKEN_FILE = CONFIG_DIR / "token"
 DEFAULT_PORT = 8765
+DEVICE_NAME = "companion-virtual-input"
 
-# ---------------------------------------------------------------------------
-# Character -> (keycode, needs_shift, needs_altgr) tables. uinput sends physical
-# keys, so the compositor's active layout decides what comes out. Pick the table
-# that matches the layout you actually use ("uk" or "us").
-# ---------------------------------------------------------------------------
 LETTERS = {c: getattr(e, f"KEY_{c.upper()}") for c in "abcdefghijklmnopqrstuvwxyz"}
 DIGITS = {str(i): getattr(e, f"KEY_{i}") for i in range(10)}
-
-
-def _build_layout(kind: str) -> dict:
-    m = {}
-    for c, k in LETTERS.items():
-        m[c] = (k, False, False)
-        m[c.upper()] = (k, True, False)
-    for c, k in DIGITS.items():
-        m[c] = (k, False, False)
-    m.update({
-        " ": (e.KEY_SPACE, False, False),
-        "\n": (e.KEY_ENTER, False, False),
-        "\t": (e.KEY_TAB, False, False),
-        "-": (e.KEY_MINUS, False, False), "_": (e.KEY_MINUS, True, False),
-        "=": (e.KEY_EQUAL, False, False), "+": (e.KEY_EQUAL, True, False),
-        "[": (e.KEY_LEFTBRACE, False, False), "{": (e.KEY_LEFTBRACE, True, False),
-        "]": (e.KEY_RIGHTBRACE, False, False), "}": (e.KEY_RIGHTBRACE, True, False),
-        ";": (e.KEY_SEMICOLON, False, False), ":": (e.KEY_SEMICOLON, True, False),
-        ",": (e.KEY_COMMA, False, False), "<": (e.KEY_COMMA, True, False),
-        ".": (e.KEY_DOT, False, False), ">": (e.KEY_DOT, True, False),
-        "/": (e.KEY_SLASH, False, False), "?": (e.KEY_SLASH, True, False),
-        "!": (e.KEY_1, True, False),
-        "%": (e.KEY_5, True, False), "^": (e.KEY_6, True, False),
-        "&": (e.KEY_7, True, False), "*": (e.KEY_8, True, False),
-        "(": (e.KEY_9, True, False), ")": (e.KEY_0, True, False),
-        "$": (e.KEY_4, True, False),
-    })
-    if kind == "uk":
-        m.update({
-            "'": (e.KEY_APOSTROPHE, False, False), "@": (e.KEY_APOSTROPHE, True, False),
-            '"': (e.KEY_2, True, False), "£": (e.KEY_3, True, False),
-            "#": (e.KEY_BACKSLASH, False, False), "~": (e.KEY_BACKSLASH, True, False),
-            "\\": (e.KEY_102ND, False, False), "|": (e.KEY_102ND, True, False),
-            "`": (e.KEY_GRAVE, False, False), "¬": (e.KEY_GRAVE, True, False),
-            "€": (e.KEY_4, False, True),
-        })
-    else:  # us
-        m.update({
-            "'": (e.KEY_APOSTROPHE, False, False), '"': (e.KEY_APOSTROPHE, True, False),
-            "@": (e.KEY_2, True, False), "#": (e.KEY_3, True, False),
-            "\\": (e.KEY_BACKSLASH, False, False), "|": (e.KEY_BACKSLASH, True, False),
-            "`": (e.KEY_GRAVE, False, False), "~": (e.KEY_GRAVE, True, False),
-        })
-    return m
 
 
 NAMED_KEYS = {
@@ -124,24 +79,47 @@ def resolve_key(name: str):
 class VirtualInput:
     """One virtual device that is both a mouse and a keyboard."""
 
-    def __init__(self, layout: str = "uk"):
-        self.layout = _build_layout(layout)
+    def __init__(self, layout: str = "auto", paster: ClipboardPaste = None):
+        """layout: "auto" follows the compositor's keymap (re-read on every connect),
+        anything else is an XKB layout name ("uk" is accepted for "gb")."""
+        self.auto_layout = layout == "auto"
+        self.charmap = {}
+        self.paster = paster
         keys = set(NAMED_KEYS.values()) | set(MODIFIERS.values()) | set(BUTTONS.values())
-        keys |= set(LETTERS.values()) | set(DIGITS.values())
-        for k, _, _ in self.layout.values():
-            keys.add(k)
+        keys |= set(LETTERS.values()) | set(DIGITS.values()) | set(keymap.CANDIDATE_KEYS)
         caps = {
             e.EV_KEY: sorted(keys),
             e.EV_REL: [e.REL_X, e.REL_Y, e.REL_WHEEL, e.REL_HWHEEL,
                        e.REL_WHEEL_HI_RES, e.REL_HWHEEL_HI_RES],
         }
-        self.ui = UInput(caps, name="companion-virtual-input", vendor=0x1234, product=0x5678)
+        self.ui = UInput(caps, name=DEVICE_NAME, vendor=0x1234, product=0x5678)
         self._rx = 0.0
         self._ry = 0.0
         self._wheel_acc = 0.0
         self._hwheel_acc = 0.0
+        self._wheel_lo = 0  # hi-res units not yet reported as a legacy notch
+        self._hwheel_lo = 0
         self._held_buttons = set()
         self._held_mods = set()
+        if not self.auto_layout:
+            self._load_keymap(keymap.static(layout), 0, "--layout")
+        else:
+            self.refresh_keymap()
+
+    def _load_keymap(self, rmlvo: dict, group: int, source: str):
+        try:
+            self.charmap = keymap.build_charmap(rmlvo, group)
+            log.info("keymap from %s: %s (group %d), %d chars", source,
+                     rmlvo.get("layout"), group, len(self.charmap))
+        except (OSError, ValueError) as ex:
+            log.error("keymap %s unusable (%s), falling back to us", rmlvo, ex)
+            self.charmap = keymap.build_charmap({"layout": "us"})
+
+    def refresh_keymap(self):
+        """Re-detect the layout. Called per connection so a KDE <-> Hyprland switch or a
+        layout change is picked up without restarting the daemon."""
+        if self.auto_layout:
+            self._load_keymap(*keymap.detect(DEVICE_NAME))
 
     # -- pointer -----------------------------------------------------------
     def move(self, dx: float, dy: float):
@@ -165,17 +143,21 @@ class VirtualInput:
         self._wheel_acc += dy
         self._hwheel_acc += dx
         wrote = False
-        for acc_name, hi, lo in (("_wheel_acc", e.REL_WHEEL_HI_RES, e.REL_WHEEL),
-                                 ("_hwheel_acc", e.REL_HWHEEL_HI_RES, e.REL_HWHEEL)):
+        for acc_name, lo_name, hi, lo in (("_wheel_acc", "_wheel_lo", e.REL_WHEEL_HI_RES, e.REL_WHEEL),
+                                          ("_hwheel_acc", "_hwheel_lo", e.REL_HWHEEL_HI_RES, e.REL_HWHEEL)):
             acc = getattr(self, acc_name)
             hi_units = int(acc * 120)
             if hi_units:
                 self.ui.write(e.EV_REL, hi, hi_units)
                 setattr(self, acc_name, acc - hi_units / 120.0)
-                # legacy low-res event once a full notch has accumulated
-                notches = int(hi_units / 120)
+                # legacy low-res event each time the running hi-res total crosses a full
+                # notch, like the kernel's HID driver. libinput ignores it when hi-res
+                # exists (verified on Hyprland: no double scroll), but other readers need it.
+                lo_acc = getattr(self, lo_name) + hi_units
+                notches = int(lo_acc / 120)
                 if notches:
                     self.ui.write(e.EV_REL, lo, notches)
+                setattr(self, lo_name, lo_acc - notches * 120)
                 wrote = True
         if wrote:
             self.ui.syn()
@@ -217,19 +199,37 @@ class VirtualInput:
         mod_codes = [MODIFIERS[m] for m in mods if m in MODIFIERS]
         self._tap(code, mod_codes)
 
-    def text(self, s: str):
-        for ch in s:
-            spec = self.layout.get(ch)
-            if spec is None:
-                log.debug("no keymap for %r, skipped", ch)
-                continue
-            code, shift, altgr = spec
-            mods = []
-            if shift:
-                mods.append(e.KEY_LEFTSHIFT)
-            if altgr:
-                mods.append(e.KEY_RIGHTALT)
-            self._tap(code, mods)
+    async def text(self, s: str):
+        """Type s. Characters the keymap can't produce are pasted via the clipboard
+        (each run in one go) if a paster is set, otherwise skipped."""
+        saved = None
+        try:
+            i = 0
+            while i < len(s):
+                spec = self.charmap.get(s[i])
+                if spec is not None:
+                    code, shift, altgr = spec
+                    mods = []
+                    if shift:
+                        mods.append(e.KEY_LEFTSHIFT)
+                    if altgr:
+                        mods.append(e.KEY_RIGHTALT)
+                    self._tap(code, mods)
+                    i += 1
+                    continue
+                j = i
+                while j < len(s) and s[j] not in self.charmap:
+                    j += 1
+                if self.paster is None:
+                    log.debug("no keymap for %r, skipped", s[i:j])
+                else:
+                    if saved is None:
+                        saved = await self.paster.snapshot()
+                    await self.paster.paste(s[i:j], self._tap)
+                i = j
+        finally:
+            if saved is not None:
+                await self.paster.restore(saved)
 
     def release_all(self):
         """Never leave a button or modifier stuck if a client disconnects mid-gesture."""
@@ -295,13 +295,14 @@ class Server:
             except Exception:
                 pass
         self.active = ws
+        self.vin.refresh_keymap()
         await ws.send(json.dumps({"t": "ok", "host": socket.gethostname()}))
         log.info("client connected: %s", peer)
 
         try:
             async for raw in ws:
                 try:
-                    self.dispatch(json.loads(raw))
+                    await self.dispatch(json.loads(raw))
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as ex:
                     log.debug("bad message %r: %s", raw, ex)
         except websockets.ConnectionClosed:
@@ -315,7 +316,7 @@ class Server:
     def _clamp(self, v: float) -> float:
         return max(-self.max_step, min(self.max_step, float(v)))
 
-    def dispatch(self, m: dict):
+    async def dispatch(self, m: dict):
         t = m["t"]
         if t == "mv":
             self.vin.move(self._clamp(m["dx"]), self._clamp(m["dy"]))
@@ -324,7 +325,7 @@ class Server:
         elif t == "btn":
             self.vin.button(m["b"], m["s"])
         elif t == "text":
-            self.vin.text(str(m["s"])[:2000])
+            await self.vin.text(str(m["s"])[:2000])
         elif t == "key":
             self.vin.key(m["k"], m.get("mods", ()))
         elif t == "ping":
@@ -333,7 +334,13 @@ class Server:
 
 async def amain(args):
     token = load_or_create_token()
-    vin = VirtualInput(args.layout)
+    paster = None
+    if not args.no_clipboard:
+        if ClipboardPaste.available():
+            paster = ClipboardPaste()
+        else:
+            log.warning("wl-copy/wl-paste or WAYLAND_DISPLAY missing: untypeable characters will be skipped")
+    vin = VirtualInput(args.layout, paster)
     srv = Server(vin, token, args.max_step)
     ip = lan_ip()
     print(f"\nCompanion daemon listening on ws://{args.host}:{args.port}  (layout: {args.layout})")
@@ -352,8 +359,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--host", default="0.0.0.0", help="bind address (default 0.0.0.0)")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
-    p.add_argument("--layout", choices=["uk", "us"], default="uk",
-                   help="keyboard layout used when typing text from the phone")
+    p.add_argument("--layout", default="auto",
+                   help="XKB layout used to type text from the phone: 'auto' (default) follows the "
+                        "compositor, or name one, e.g. gb/uk, us, custom")
+    p.add_argument("--no-clipboard", action="store_true",
+                   help="skip characters the layout can't type instead of pasting them via the clipboard")
     p.add_argument("--max-step", type=float, default=400.0,
                    help="clamp on a single movement/scroll message (safety)")
     p.add_argument("-v", "--verbose", action="store_true")
