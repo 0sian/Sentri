@@ -1,11 +1,16 @@
 [Unit]
 Description=Companion phone-as-trackpad daemon
-After=network-online.target
+# Started with the graphical session (uwsm for Hyprland, Plasma's systemd startup for
+# KDE both activate graphical-session.target), so WAYLAND_DISPLAY and
+# HYPRLAND_INSTANCE_SIGNATURE are in the environment for layout detection and wl-copy.
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
 
 [Service]
-ExecStart=%h/companion/daemon/.venv/bin/python %h/companion/daemon/companion_daemon.py --layout uk
+ExecStart=%h/companion/daemon/.venv/bin/python %h/companion/daemon/companion_daemon.py
 Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
