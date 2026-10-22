@@ -650,7 +650,7 @@ class OpenUrl(Tool):
         except ValueError:
             is_ip = False
         port = f":{u.port}" if u.port else ""
-        rest = u.path + (f"?{u.query}" if u.query else "")
+        rest = ("" if u.path == "/" else u.path) + (f"?{u.query}" if u.query else "")  # no bare trailing "/"
         browser = resolve_app(args["app"]) if args.get("app") is not None else None
         return {"url": url, "host": host, "is_ip": is_ip, "shown": host + port + rest, "browser": browser}
 

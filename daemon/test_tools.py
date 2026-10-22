@@ -328,13 +328,13 @@ async def confirm_tier_tests():
           and out == "Opened www.atlasobscura.com in Vivaldi", (rec.argv, out))
     a = await ou.prepare({"url": "https://example.com/", "app": "firefox"})
     check("open_url: app picks another browser (validated against installed apps)",
-          ou.summary(a) == "Open example.com/ in Firefox" and a["existing"] == "0xabc", ou.summary(a))
+          ou.summary(a) == "Open example.com in Firefox" and a["existing"] == "0xabc", ou.summary(a))
     check("open_url: unknown app rejected", rejects(ou, {"url": "https://example.com/", "app": "netscape"}))
     rec.answers["xdg-settings get default-web-browser"] = t.ToolError("no xdg-settings")
     a = await ou.prepare({"url": "https://example.com/"})
     rec.argv.clear()
     out = await ou.run(a)
-    check("open_url: default unknown -> xdg-open, says so", ou.summary(a) == "Open example.com/ in your browser"
+    check("open_url: default unknown -> xdg-open, says so", ou.summary(a) == "Open example.com in your browser"
           and rec.argv[0][-2] == "xdg-open" and out == "Opened example.com in the default browser", (rec.argv, out))
 
     # --- registry ---
