@@ -21,7 +21,7 @@ done. The Steam and KDE Connect udev rules already tag uinput `uaccess` for the
 logged-in user. Otherwise, tag it the same way:
 
 ```fish
-sudo cp 99-companion-uinput.rules /etc/udev/rules.d/
+sudo cp 70-companion-uinput.rules /etc/udev/rules.d/
 sudo udevadm control --reload; and sudo udevadm trigger
 ```
 
