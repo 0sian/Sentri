@@ -115,3 +115,24 @@ behaviour the spec leaves open. None of them adds a message or field:
      can't add arguments.
    - Cancel/reset/disconnect with a card up: the card resolves as `tool` `denied`/`user` (if the
      socket is still open) and the turn ends `cancelled`. A late `confirm` for that call is ignored.
+9. **Routines** (`list_routines` auto, `run_routine(name)`). Steps take the tool's *real* arguments
+   (so `set_volume` needs `action = "set", percent = 30`, not just `percent`). Allowed step tools:
+   launch_app, set_volume, media_control, get_status, type_text, press_keys, open_url,
+   run_named_command. Not allowed: tools that need ephemeral ids (focus/close_window),
+   screenshot/read_clipboard, memory tools, routines. Every routine is fully validated at daemon
+   start (bad ones skipped with a log line) and each step is re-validated just before it runs.
+   Routines are read at daemon start, so edits to ai.toml need a restart. Card: one
+   `confirm_req` at the highest step risk, with `summary` like
+   "Work routine: open Firefox, set volume to 30%". **Routine summaries can be up to 400 chars**
+   (other cards stay at 200 or less); a routine whose card would be longer is rejected at load,
+   so nothing is ever approved unseen. Progress: the routine's own `call` goes running → (one
+   call per step, running → ok/error, summary "Work · Open Firefox") → ok/error.
+10. **Memory.** File `~/.local/share/companion/memory.toml` (mode 600), editable by hand; a file with
+   a syntax error is never overwritten. Two departures from the task, for API reasons:
+   - The memory block is a **snapshot per conversation** (taken on daemon start, `chat_reset`, or a
+     context trim), placed after the cached static prompt and tool definitions. Rewriting the system
+     prompt mid-conversation would make Haiku 5.5 reject the replayed thinking blocks (400).
+     Mid-conversation changes reach the model through the remember/forget tool results.
+   - **Taint lasts for the conversation, not just the turn**: untrusted text stays in context after
+     the turn that read it. Taint is set by get_status, list_windows, screenshot, read_clipboard,
+     run_named_command (and routines containing those); it clears on `chat_reset`.

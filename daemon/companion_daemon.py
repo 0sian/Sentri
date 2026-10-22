@@ -27,6 +27,7 @@ from evdev import UInput, ecodes as e
 
 import ai
 import keymap
+import memory
 from clipboard import ClipboardPaste
 
 log = logging.getLogger("companion")
@@ -419,7 +420,7 @@ async def amain(args):
     vin = VirtualInput(args.layout, paster)
     cfg = ai.load_config()
     input_lock = asyncio.Lock()
-    assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock)) if cfg else None
+    assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore()) if cfg else None
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
     srv = Server(vin, token, args.max_step, assistant, input_lock)

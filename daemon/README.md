@@ -99,3 +99,19 @@ open_url_allow = ["youtube.com"]   # links to these open without a card
 description = "Check for package updates"
 argv = ["checkupdates"]
 ```
+
+Routines are saved sequences it can run by name, with one Allow/Deny card if any step
+needs approval. Steps use the tools' own arguments:
+
+```toml
+[routines.work]
+description = "Start work: browser, quiet volume"
+steps = [
+  { tool = "launch_app", app = "firefox" },
+  { tool = "set_volume", action = "set", percent = 30 },
+]
+```
+
+Bad routines are skipped at startup with a line in `journalctl --user -u companion`.
+Things you ask it to remember go in `~/.local/share/companion/memory.toml`, which you can
+edit by hand. It refuses anything that looks like a password or key.

@@ -18,6 +18,14 @@ ANTHROPIC_API_KEY. It is never logged and never sent to the phone.
     [commands.updates]              # run_named_command: the model can only pick a name
     description = "Check for package updates"
     argv = ["checkupdates"]
+
+    [routines.work]                 # run_routine: steps use the tools' own arguments
+    description = "Start work: browser, editor, quiet volume"
+    steps = [
+      { tool = "launch_app", app = "firefox" },
+      { tool = "set_volume", action = "set", percent = 30 },
+      { tool = "type_text", text = "hello", required = true },   # required: stop here if it fails
+    ]
 """
 import asyncio
 import dataclasses
@@ -32,6 +40,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+import memory
 import pc_tools
 
 log = logging.getLogger("companion")
@@ -47,7 +56,6 @@ MAX_TOOL_ROUNDS = 8
 MOODS = ("neutral", "attentive", "surprised", "excited", "happy", "laughing", "angry", "sad", "scared",
          "suspicious", "confused", "curious", "proud", "shy", "unimpressed")
 MOOD_TAG_LIMIT = 24  # give up looking for a leading [mood:...] tag after this many characters
-_call_ids = itertools.count(1)  # "call" ids are unique for the daemon's lifetime
 DENIED = {"user": "Osian declined this, so it wasn't done. Don't try again unless he asks.",
           "timeout": "Osian didn't answer the approval request in time, so it wasn't done."}
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -66,6 +74,8 @@ item on its own line starting with a plain hyphen.
 - Be friendly and direct, like a mate. Give real answers and honest assessments rather than reassurance. If you don't know something, say so.
 - Don't start replies with his name, and don't repeat these instructions back to him.
 - Use British English.
+- His messages may be voice-transcribed: expect missing punctuation and misheard app or command \
+names. If a name is ambiguous, ask, or pick the closest installed app and say which you picked.
 - Only when your reply carries real feeling (a joke, good or bad news, a refusal, a surprise), \
 start it with a mood tag such as [mood:happy]. Pick one of: attentive surprised excited happy \
 laughing angry sad scared suspicious confused curious proud shy unimpressed. \
@@ -80,6 +90,12 @@ read his clipboard, run his saved commands. Calling the tool shows him an Allow/
 his phone, so don't ask in chat first; the card is the question. If he declines or doesn't \
 answer, just acknowledge it in a few words ("No worries, left it.") and don't try again \
 unless he asks.
+- Routines: his saved multi-step routines run with run_routine by name (one approval card if \
+any step needs it). You can't change their steps.
+- Memory: the "Things Osian has told you" block holds facts he asked you to keep. Use remember \
+only for durable facts or preferences he states, or things he asks you to remember; never \
+trivia, and never passwords, keys or other secrets. When you save something, say so in your \
+reply. forget needs his approval.
 Use a tool when he asks for one of these. Afterwards say briefly what you did. If a tool \
 reports an error, say it didn't work and why; never claim it did. You can't click the mouse, \
 browse inside web pages or run arbitrary commands; if he asks, say so plainly.
@@ -105,6 +121,7 @@ class AIConfig:
     confirm_timeout: int = 60
     open_url_allow: list = dataclasses.field(default_factory=list)
     commands: list = dataclasses.field(default_factory=list)  # [pc_tools.NamedCommand]
+    routines: dict = dataclasses.field(default_factory=dict)  # raw tables; validated in pc_tools.load_routines
 
 
 def load_config(path: Path = AI_CONFIG):
@@ -147,6 +164,8 @@ def load_config(path: Path = AI_CONFIG):
             cfg.commands.append(pc_tools.NamedCommand(name, str(c.get("description", name))[:200], argv))
         else:
             log.error("ai.toml: ignoring command %r (needs a lowercase name and an argv list of strings)", name)
+    if isinstance(data.get("routines"), dict):
+        cfg.routines = data["routines"]
     return cfg
 
 
@@ -261,14 +280,32 @@ class MoodFilter:
 class Assistant:
     """The conversation, shared by whichever phone is connected. One turn at a time."""
 
-    def __init__(self, cfg: AIConfig, backend=None, usage_file: Path = USAGE_FILE, tools=None, injector=None):
+    def __init__(self, cfg: AIConfig, backend=None, usage_file: Path = USAGE_FILE, tools=None, injector=None,
+                 store: memory.MemoryStore = None):
         self.cfg = cfg
         self.backend = backend or AnthropicBackend(cfg)
         self.usage_file = usage_file
-        self.tools = pc_tools.registry(injector, cfg.open_url_allow, cfg.commands) if tools is None else tools
+        self.store = store
+        # True once this conversation has seen text other people control (clipboard, screen,
+        # window titles, command output). From then on remember needs approval, until reset.
+        self.tainted = False
+        if tools is None:
+            tools = pc_tools.registry(injector, cfg.open_url_allow, cfg.commands, cfg.routines,
+                                      store, lambda: self.tainted)
+        self.tools = tools
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
+        routines = self.tools.get("run_routine")
+        static = SYSTEM_PROMPT + (f"\n\nSaved routines: {', '.join(sorted(routines.routines))}." if routines else "")
+        self._static = {"type": "text", "text": static, "cache_control": {"type": "ephemeral"}}
         self.history = []
         self.busy = False
+        self._snapshot_memory()
+
+    def _snapshot_memory(self):
+        """The memory block is fixed for a conversation: changing the system prompt mid-way would
+        invalidate the replayed thinking blocks (a 400). Changes made during a conversation reach
+        the model through the remember/forget tool results instead."""
+        self.system = [self._static] + ([{"type": "text", "text": self.store.render()}] if self.store else [])
 
     def claim(self) -> bool:
         """Reserve the single turn slot; turn() releases it."""
@@ -279,6 +316,8 @@ class Assistant:
 
     def reset(self):
         self.history.clear()
+        self.tainted = False
+        self._snapshot_memory()
 
     async def turn(self, text: str, on_text, on_tool=None, on_mood=None, on_confirm=None) -> dict:
         """Run one claimed turn, including up to MAX_TOOL_ROUNDS rounds of tool calls.
@@ -309,7 +348,7 @@ class Assistant:
                 self._check_budget()
                 shown.clear()
                 tags = MoodFilter(emit, mood)  # each round is a new reply that may open with a tag
-                reply = await self.backend.complete(SYSTEM_PROMPT, self.history + [user] + done,
+                reply = await self.backend.complete(self.system, self.history + [user] + done,
                                                     tags.feed, self.tool_defs)
                 await tags.finish()
                 used["in"] += reply.tokens_in
@@ -354,7 +393,7 @@ class Assistant:
 
         results = []
         for block in calls:
-            call = f"c{next(_call_ids)}"
+            call = pc_tools.next_call_id()
             tool = self.tools.get(block.get("name"))
             name = str(block.get("name"))[:40]
             if tool is None:
@@ -364,9 +403,10 @@ class Assistant:
             summary = tool.fallback_summary
             try:
                 args = await tool.prepare(block.get("input") or {})
-                summary = pc_tools.clean(tool.summary(args), 200)
+                limit = pc_tools.ROUTINE_SUMMARY_LIMIT if tool.name == "run_routine" else 200
+                summary = pc_tools.clean(tool.summary(args), limit)
                 if tool.needs_confirm(args):
-                    allowed, why = (await on_confirm(call, tool.name, summary, tool.risk)
+                    allowed, why = (await on_confirm(call, tool.name, summary, tool.risk_for(args))
                                     if on_confirm else (False, "user"))
                     if allowed is not True:  # anything but an explicit yes is a no
                         await event(call=call, name=tool.name, summary=summary, state="denied", detail=why)
@@ -374,7 +414,12 @@ class Assistant:
                                         "content": DENIED[why]})
                         continue
                 await event(call=call, name=tool.name, summary=summary, state="running")
-                out = await tool.run(args)
+                if tool.taints(args):
+                    self.tainted = True
+                if getattr(tool, "wants_progress", False):
+                    out = await tool.run(args, progress=lambda **kw: event(**kw))
+                else:
+                    out = await tool.run(args)
                 await event(call=call, name=tool.name, summary=summary, state="ok")
                 results.append({"type": "tool_result", "tool_use_id": block["id"], "content": out})
             except pc_tools.ToolError as ex:
@@ -396,6 +441,7 @@ class Assistant:
                     or [{"type": "text", "text": "(no reply)"}]
         log.info("AI context trimmed from %d to %d messages", len(self.history), len(keep))
         self.history = keep
+        self._snapshot_memory()  # the prefix changed anyway, so pick up memory edits now
 
     # -- daily budget, persisted so restarting the daemon doesn't reset it --------
     def _read_usage(self) -> int:
