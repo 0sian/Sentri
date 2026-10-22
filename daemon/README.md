@@ -70,3 +70,7 @@ on logout.
 - Whoever has the token controls your mouse and keyboard. Keep the token file private
   (it is created `chmod 600`). Delete it and restart to rotate.
 - Firewall: allow TCP 8765 from the LAN only, e.g. `sudo ufw allow from 192.168.1.0/24 to any port 8765 proto tcp`.
+
+On KDE the unit also sets flat pointer acceleration for the virtual device only
+(`kcminputrc`, group `[Libinput][4660][22136][companion-virtual-input]`), so KWin doesn't
+apply its own acceleration on top of the app's.

@@ -34,6 +34,8 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 TOKEN_FILE = CONFIG_DIR / "token"
 DEFAULT_PORT = 8765
 DEVICE_NAME = "companion-virtual-input"
+QUEUE_LIMIT = 1000  # pending input messages per connection before new ones are dropped
+MAX_PASTE_RUNS = 3  # a text message needing more separate pastes than this is pasted whole
 
 LETTERS = {c: getattr(e, f"KEY_{c.upper()}") for c in "abcdefghijklmnopqrstuvwxyz"}
 DIGITS = {str(i): getattr(e, f"KEY_{i}") for i in range(10)}
@@ -200,9 +202,14 @@ class VirtualInput:
         self._tap(code, mod_codes)
 
     async def text(self, s: str):
-        """Type s. Characters the keymap can't produce are pasted via the clipboard
-        (each run in one go) if a paster is set, otherwise skipped."""
+        """Type s. Characters the keymap can't produce are pasted via the clipboard if a
+        paster is set (each run in one go; if that would take more than MAX_PASTE_RUNS
+        pastes, everything from the first one onwards in one go), otherwise skipped."""
         saved = None
+        # each paste costs ~the paster's settle time, so bound how many one message can do
+        runs = sum(1 for k, ch in enumerate(s)
+                   if ch not in self.charmap and (k == 0 or s[k - 1] in self.charmap))
+        paste_whole = runs > MAX_PASTE_RUNS
         try:
             i = 0
             while i < len(s):
@@ -220,6 +227,8 @@ class VirtualInput:
                 j = i
                 while j < len(s) and s[j] not in self.charmap:
                     j += 1
+                if self.paster is not None and paste_whole:
+                    j = len(s)
                 if self.paster is None:
                     log.debug("no keymap for %r, skipped", s[i:j])
                 else:
@@ -295,23 +304,47 @@ class Server:
             except Exception:
                 pass
         self.active = ws
-        self.vin.refresh_keymap()
+        await asyncio.to_thread(self.vin.refresh_keymap)
         await ws.send(json.dumps({"t": "ok", "host": socket.gethostname()}))
         log.info("client connected: %s", peer)
 
+        # Input is applied in order by a worker so a paste (which awaits the clipboard)
+        # never holds up reading the socket; pings are answered straight from the read loop.
+        queue = asyncio.Queue(maxsize=QUEUE_LIMIT)
+        worker = asyncio.create_task(self._apply_input(queue))
         try:
             async for raw in ws:
                 try:
-                    await self.dispatch(json.loads(raw))
+                    m = json.loads(raw)
+                    if m["t"] == "ping":
+                        if isinstance(m.get("id"), int) and not isinstance(m["id"], bool):
+                            await ws.send(json.dumps({"t": "pong", "id": m["id"]}))
+                    else:
+                        queue.put_nowait(m)
+                except asyncio.QueueFull:
+                    log.warning("input queue full, dropping %r", raw[:80])
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as ex:
                     log.debug("bad message %r: %s", raw, ex)
         except websockets.ConnectionClosed:
             pass
         finally:
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
             self.vin.release_all()
             if self.active is ws:
                 self.active = None
             log.info("client disconnected: %s", peer)
+
+    async def _apply_input(self, queue: asyncio.Queue):
+        while True:
+            m = await queue.get()
+            try:
+                await self.dispatch(m)
+            except (KeyError, TypeError, ValueError) as ex:
+                log.debug("bad message %r: %s", m, ex)
 
     def _clamp(self, v: float) -> float:
         return max(-self.max_step, min(self.max_step, float(v)))
@@ -328,8 +361,6 @@ class Server:
             await self.vin.text(str(m["s"])[:2000])
         elif t == "key":
             self.vin.key(m["k"], m.get("mods", ()))
-        elif t == "ping":
-            pass  # keepalive handled by websockets ping; app-level ping is a no-op
 
 
 async def amain(args):

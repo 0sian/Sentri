@@ -8,6 +8,11 @@ After=graphical-session.target
 Requisite=graphical-session.target
 
 [Service]
+# KDE: flat pointer acceleration for our device only, so KWin doesn't stack libinput's
+# adaptive curve on top of the app's own (Hyprland is already flat globally). Group is
+# [Libinput][vendor][product][name] in decimal; vendor/product set in companion_daemon.py.
+# KWin reads it when the device appears. "-" = ignore failure (no KDE installed).
+ExecStartPre=-/usr/bin/kwriteconfig6 --file kcminputrc --group Libinput --group 4660 --group 22136 --group companion-virtual-input --key PointerAccelerationProfile 1
 ExecStart=%h/companion/daemon/.venv/bin/python %h/companion/daemon/companion_daemon.py
 Restart=on-failure
 RestartSec=2

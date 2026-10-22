@@ -178,12 +178,61 @@ async def main():
         await ws2.close()
 
     await keymap_tests()
+    await queue_tests()
 
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
         sys.exit(1)
     print("all tests passed")
+
+
+class SlowPaster(FakePaster):
+    async def paste(self, text, tap):
+        await super().paste(text, tap)
+        await asyncio.sleep(0.5)
+
+
+async def queue_tests():
+    vin = cd.VirtualInput("uk", SlowPaster())
+    srv = cd.Server(vin, TOKEN, 400.0)
+    async with websockets.serve(srv.handler, "127.0.0.1", PORT + 1):
+        ws = await websockets.connect(f"ws://127.0.0.1:{PORT + 1}")
+        ch = json.loads(await ws.recv())
+        await ws.send(json.dumps({"t": "auth", "hmac": hmac.new(TOKEN.encode(), ch["nonce"].encode(), hashlib.sha256).hexdigest()}))
+        await ws.recv()
+
+        await ws.send(json.dumps({"t": "ping", "id": 7}))
+        reply = json.loads(await asyncio.wait_for(ws.recv(), 1))
+        check("ping with id gets pong with same id", reply == {"t": "pong", "id": 7}, reply)
+
+        await ws.send(json.dumps({"t": "ping"}))
+        await ws.send(json.dumps({"t": "ping", "id": "x"}))
+        try:
+            extra = await asyncio.wait_for(ws.recv(), 0.2)
+        except asyncio.TimeoutError:
+            extra = None
+        check("ping without (int) id: no reply", extra is None, extra)
+
+        vin.ui.events.clear()
+        await ws.send(json.dumps({"t": "text", "s": "ŵ"}))  # paste takes 0.5 s
+        await ws.send(json.dumps({"t": "mv", "dx": 3, "dy": 0}))
+        await ws.send(json.dumps({"t": "ping", "id": 8}))
+        t0 = asyncio.get_running_loop().time()
+        reply = json.loads(await asyncio.wait_for(ws.recv(), 1))
+        dt = asyncio.get_running_loop().time() - t0
+        check("pong not queued behind a slow paste", reply == {"t": "pong", "id": 8} and dt < 0.2, (reply, dt))
+        moved_early = (e.EV_REL, e.REL_X, 3) in vin.ui.events
+        await asyncio.sleep(0.7)
+        check("input after a paste stays in order", not moved_early and (e.EV_REL, e.REL_X, 3) in vin.ui.events,
+              vin.ui.events)
+        await ws.close()
+
+    fp = FakePaster()
+    many = cd.VirtualInput("uk", fp)
+    await many.text("aŵbŵcŵdŵe")
+    check("more than MAX_PASTE_RUNS runs: rest of message pasted whole",
+          [x for x in fp.log if isinstance(x, tuple) and x[0] == "paste"] == [("paste", "ŵbŵcŵdŵe")], fp.log)
 
 
 def keys_down(vin):
