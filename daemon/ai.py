@@ -187,10 +187,15 @@ class MoodFilter:
         self.emit, self.on_mood = emit, on_mood
         self.buf = ""
         self.passing = False
+        self.trim = False  # just removed a tag: drop whitespace until the first real character
 
     async def feed(self, chunk: str):
         if self.passing:
-            await self.emit(chunk)
+            if self.trim:
+                chunk = chunk.lstrip()
+                self.trim = not chunk
+            if chunk:
+                await self.emit(chunk)
             return
         self.buf += chunk
         head = self.buf.lstrip()
@@ -209,7 +214,8 @@ class MoodFilter:
         mood = tag[5:].strip()
         if mood in MOODS:
             await self.on_mood(mood)
-        await self._release(rest.lstrip())
+        self.trim = True
+        await self._release(rest)
 
     async def finish(self):
         """End of the round: whatever is still held back was ordinary text."""
@@ -219,8 +225,7 @@ class MoodFilter:
     async def _release(self, text: str):
         self.passing = True
         self.buf = ""
-        if text:
-            await self.emit(text)
+        await self.feed(text)
 
 
 class Assistant:

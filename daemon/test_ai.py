@@ -431,6 +431,7 @@ async def mood_tests():
     cases = [
         (["[mo", "od:hap", "py] Hi", " there"], "Hi there", ["happy"], "tag split across chunks"),
         (["  [Mood: Curious]", "Ooh"], "Ooh", ["curious"], "leading space, case-insensitive"),
+        (["[mood:happy]", " ", " Congrats", " Osian"], "Congrats Osian", ["happy"], "space after the tag in later chunks dropped"),
         (["Hello", " world"], "Hello world", [], "no tag passes straight through"),
         (["[1] first", " point"], "[1] first point", [], "bracketed non-mood start kept intact"),
         (["[mood:thinking] hmm"], "hmm", [], "phone-driven mood stripped, not sent"),
