@@ -36,6 +36,7 @@ Unknown fields/messages must be ignored by both sides.
 | `confirm_req` | `id`, `call`, `name`, `summary`, `risk` (`low`/`high`), `timeout` (s) | ask the user to approve one specific action |
 | `chat_done` | `id`, `usage?` `{"in":int,"out":int}`, `cancelled?` | turn finished. Exactly one of `chat_done` / `chat_error` ends every turn |
 | `chat_error` | `id`, `msg` (short, user-readable) | turn failed (API error, budget reached, busy, ...) |
+| `cu_session` | `state`: `active` (+ `secs_left`, `goal` ≤160 chars) / `ended` (+ `reason`) | computer-use session banner. `active` is sent when a session starts (and again if its deadline changes). `ended` reasons: `done` `timeout` `user` `touched` `limit` `error` `disconnected`. Added 2026-10-22 |
 | `chat_mood` | `id`, `mood` | optional, at most once per turn, sent as early as possible (before the first `chat_delta` when the reply opens with it). One of: neutral attentive surprised excited happy laughing angry sad scared suspicious confused curious proud shy unimpressed (`thinking`/`alert`/`sleepy` are phone-driven, never sent). Unknown values are ignored by the phone. Added 2026-10-22 |
 
 Ordering for a turn: any mix of `chat_delta` / `tool` / `confirm_req`, then exactly one `chat_done` or `chat_error`.
@@ -143,3 +144,31 @@ behaviour the spec leaves open. None of them adds a message or field:
    Glances 3 `docker` plugin first). Output is reduced to a few lines, and container, mount and
    sensor names are cleaned like window titles. Unreachable homelab means a clean tool error. No
    restart/write tools.
+12. **Computer use** (`start_computer_use(goal)`, high risk; `caps` gains `"cu"`). Phone → daemon:
+   `{"t":"cu_stop"}` (ignored when nothing is running). Daemon → phone: `cu_session` (table above).
+   **One addition to the agreed reasons: `done`**, for when the session model finishes or reports
+   it's stuck via `end_computer_use`; none of the agreed reasons fit that case.
+   - The session is a sub-conversation on `cu_model` (default `claude-sonnet-5-5`), seeded with
+     the goal and a first screenshot. The main chat gets only the summary, so the main history has
+     no images and no model switch.
+   - It uses the **native `computer_toolset_20260801`** (GA, no beta header; Sonnet 5.5 accepts only
+     this form on the Claude API) with `hold_key` / `left_mouse_down` / `left_mouse_up` disabled,
+     plus custom `end_computer_use` and `open_url` (still with its card). The natives map onto the
+     spec's actions: left/right/middle/double/triple_click, left_click_drag, scroll, mouse_move,
+     type, key, wait (capped at 5 s), screenshot, zoom, cursor_position.
+   - Screenshots: focused monitor, long edge 1280, **with the real pointer drawn in** (`grim -c`)
+     instead of a synthetic crosshair, so the model sees where the pointer actually is after
+     each click. Coordinates are mapped through the monitor's offset and fractional scale, then
+     clamped to the monitor.
+   - Guardrails: `type`/`key` are refused when the focused window class is in `cu_blocklist`
+     (terminals, krunner/rofi/wofi/fuzzel, password managers; ai.toml entries add to the
+     defaults), and also while **Caelestia's launcher is open**. The launcher is a layer surface,
+     invisible to window-class checks, and can run things, so this is checked over its IPC.
+     **Every action is refused while Caelestia's power menu is open.** Super combos and Ctrl+Alt
+     combos are refused, including on clicks. A batch stops at its first failure, as the API
+     requires.
+   - Ends on the first of: `cu_secs` (300), `cu_max_actions` (60), `cu_budget_usd` (0.25, priced
+     per model from usage), `end_computer_use`, `cu_stop`, chat_cancel/reset (reason `user`),
+     disconnect/replace (`disconnected`), an error, or phone input (`mv` with a non-zero delta,
+     `sc`, `btn`, `key`, `text`: reason `touched`; the input itself still applies). Actions are
+     at least 300 ms apart. Session tokens count toward the daily cap.

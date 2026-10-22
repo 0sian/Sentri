@@ -47,6 +47,7 @@ import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 
+import cu
 import memory
 import pc_tools
 
@@ -100,6 +101,10 @@ answer, just acknowledge it in a few words ("No worries, left it.") and don't tr
 unless he asks.
 - Routines: his saved multi-step routines run with run_routine by name (one approval card if \
 any step needs it). You can't change their steps.
+- Computer use: you can't click or navigate inside apps and web pages yourself. When he asks \
+for something like that, say plainly that you can't click, and call start_computer_use with a \
+short, specific goal; the card asks him. Never quietly do the nearest thing instead (such as \
+searching when he asked you to click something).
 - Memory: the "Things Osian has told you" block holds facts he asked you to keep. Use remember \
 only for durable facts or preferences he states, or things he asks you to remember; never \
 trivia, and never passwords, keys or other secrets. When you save something, say so in your \
@@ -131,6 +136,7 @@ class AIConfig:
     commands: list = dataclasses.field(default_factory=list)  # [pc_tools.NamedCommand]
     routines: dict = dataclasses.field(default_factory=dict)  # raw tables; validated in pc_tools.load_routines
     homelab: pc_tools.Glances = None
+    cu: "cu.CUConfig" = None  # computer-use sessions; None = off
 
 
 def load_config(path: Path = AI_CONFIG):
@@ -175,6 +181,22 @@ def load_config(path: Path = AI_CONFIG):
             log.error("ai.toml: ignoring command %r (needs a lowercase name and an argv list of strings)", name)
     if isinstance(data.get("routines"), dict):
         cfg.routines = data["routines"]
+    if data.get("cu_enabled", True) is True:
+        c = cu.CUConfig()
+        for key, field, ok in (("cu_model", "model", lambda v: isinstance(v, str) and v),
+                               ("cu_effort", "effort", lambda v: v in EFFORTS),
+                               ("cu_secs", "secs", lambda v: isinstance(v, int) and 30 <= v <= 900),
+                               ("cu_max_actions", "max_actions", lambda v: isinstance(v, int) and 1 <= v <= 200),
+                               ("cu_budget_usd", "budget_usd", lambda v: isinstance(v, (int, float)) and 0 < v <= 5)):
+            if key in data:
+                if ok(data[key]):
+                    setattr(c, field, data[key])
+                else:
+                    log.error("ai.toml: ignoring invalid %s = %r", key, data[key])
+        extra = data.get("cu_blocklist", [])
+        if isinstance(extra, list) and all(isinstance(x, str) for x in extra):
+            c.blocklist = tuple(c.blocklist) + tuple(x.lower() for x in extra)  # adds to the defaults
+        cfg.cu = c
     h = data.get("homelab")
     if isinstance(h, dict):
         u = urllib.parse.urlsplit(str(h.get("url", "")))
@@ -192,6 +214,7 @@ class Reply:
     stop_reason: str
     tokens_in: int     # uncached + cache writes + cache reads
     tokens_out: int
+    usage: dict = None  # {"uncached","cache_write","cache_read","out"}, for pricing
 
 
 class AnthropicBackend:
@@ -201,16 +224,17 @@ class AnthropicBackend:
         self.cfg = cfg
         self.client = anthropic.AsyncAnthropic(api_key=cfg.api_key, timeout=60.0)
 
-    async def complete(self, system: str, messages: list, on_text, tools: list) -> Reply:
+    async def complete(self, system, messages: list, on_text, tools: list, model: str = None,
+                       effort: str = None) -> Reply:
         a = self._anthropic
         try:
             async with self.client.messages.stream(
-                model=self.cfg.model,
+                model=model or self.cfg.model,
                 max_tokens=self.cfg.max_tokens,
                 system=system,
                 messages=messages,
                 tools=tools,
-                output_config={"effort": self.cfg.effort},
+                output_config={"effort": effort or self.cfg.effort},
                 cache_control={"type": "ephemeral"},  # caches system + history up to the newest message
             ) as stream:
                 async for event in stream:
@@ -222,7 +246,7 @@ class AnthropicBackend:
         except a.PermissionDeniedError:
             raise ChatError("The AI key isn't allowed to use this model.")
         except a.NotFoundError:
-            raise ChatError(f"Model {self.cfg.model} wasn't found. Check ai.toml on the PC.")
+            raise ChatError(f"Model {model or self.cfg.model} wasn't found. Check ai.toml on the PC.")
         except a.RateLimitError:
             raise ChatError("The AI service is rate limiting me. Try again in a minute.")
         except a.BadRequestError as ex:
@@ -239,7 +263,9 @@ class AnthropicBackend:
         log.info("AI turn: in=%d (cache read %d, write %d) out=%d stop=%s", tokens_in,
                  u.cache_read_input_tokens or 0, u.cache_creation_input_tokens or 0,
                  u.output_tokens, final.stop_reason)
-        return Reply([b.to_dict() for b in final.content], final.stop_reason, tokens_in, u.output_tokens)
+        usage = {"uncached": u.input_tokens, "cache_write": u.cache_creation_input_tokens or 0,
+                 "cache_read": u.cache_read_input_tokens or 0, "out": u.output_tokens}
+        return Reply([b.to_dict() for b in final.content], final.stop_reason, tokens_in, u.output_tokens, usage)
 
 
 class MoodFilter:
@@ -298,7 +324,7 @@ class Assistant:
     """The conversation, shared by whichever phone is connected. One turn at a time."""
 
     def __init__(self, cfg: AIConfig, backend=None, usage_file: Path = USAGE_FILE, tools=None, injector=None,
-                 store: memory.MemoryStore = None):
+                 store: memory.MemoryStore = None, desktop=None):
         self.cfg = cfg
         self.backend = backend or AnthropicBackend(cfg)
         self.usage_file = usage_file
@@ -306,9 +332,13 @@ class Assistant:
         # True once this conversation has seen text other people control (clipboard, screen,
         # window titles, command output). From then on remember needs approval, until reset.
         self.tainted = False
+        self.cu = cu.Controller()
         if tools is None:
             tools = pc_tools.registry(injector, cfg.open_url_allow, cfg.commands, cfg.routines,
                                       store, lambda: self.tainted, cfg.homelab)
+        if cfg.cu and desktop is not None:
+            tools["start_computer_use"] = cu.StartComputerUse(
+                cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
         self.tools = tools
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
         routines = self.tools.get("run_routine")
@@ -344,6 +374,8 @@ class Assistant:
         to (except by _trim): a turn is committed when it ends, and an interrupted one keeps
         only its complete tool rounds and whatever text the user already saw."""
         user = {"role": "user", "content": text}
+        if "start_computer_use" in self.tools:  # a session's open_url asks through this turn's cards
+            self.tools["start_computer_use"].on_confirm = on_confirm
         done = []          # complete (assistant tool_use, user tool_result) pairs from this turn
         shown = []         # text streamed to the phone in the current round
         used = {"in": 0, "out": 0}
@@ -490,6 +522,7 @@ class ChatSession:
     def __init__(self, assistant: Assistant, send):
         self.assistant = assistant
         self.send = send  # must swallow connection errors
+        assistant.cu.send = send  # computer-use banners go to whichever phone is connected now
         self.task = None
         self.turn_id = None
         self.pending = {}  # call -> Future[bool] for confirm cards on the phone

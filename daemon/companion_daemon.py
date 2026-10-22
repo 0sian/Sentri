@@ -26,6 +26,7 @@ import websockets
 from evdev import UInput, ecodes as e
 
 import ai
+import cu
 import keymap
 import memory
 from clipboard import ClipboardPaste
@@ -38,6 +39,7 @@ DEFAULT_PORT = 8765
 DEVICE_NAME = "companion-virtual-input"
 QUEUE_LIMIT = 1000  # pending input messages per connection before new ones are dropped
 CHAT_TYPES = {"chat", "chat_cancel", "chat_reset", "confirm"}
+INPUT_TYPES = {"mv", "sc", "btn", "text", "key"}
 MAX_PASTE_RUNS = 3  # a text message needing more separate pastes than this is pasted whole
 
 LETTERS = {c: getattr(e, f"KEY_{c.upper()}") for c in "abcdefghijklmnopqrstuvwxyz"}
@@ -243,6 +245,15 @@ class VirtualInput:
             if saved is not None:
                 await self.paster.restore(saved)
 
+    def press_mod(self, name: str, down: bool):
+        """Hold or release one modifier (for modifier-clicks); release_all() still covers it."""
+        code = MODIFIERS.get(name)
+        if code is None:
+            return
+        (self._held_mods.add if down else self._held_mods.discard)(code)
+        self.ui.write(e.EV_KEY, code, 1 if down else 0)
+        self.ui.syn()
+
     def release_all(self):
         """Never leave a button or modifier stuck if a client disconnects mid-gesture."""
         for b in list(self._held_buttons):
@@ -333,7 +344,8 @@ class Server:
         await asyncio.to_thread(self.vin.refresh_keymap)
         ok = {"t": "ok", "host": socket.gethostname()}
         if self.assistant:
-            ok.update(caps=["chat"], model=self.assistant.cfg.model)
+            caps = ["chat"] + (["cu"] if "start_computer_use" in self.assistant.tools else [])
+            ok.update(caps=caps, model=self.assistant.cfg.model)
         await ws.send(json.dumps(ok))
         log.info("client connected: %s", peer)
 
@@ -356,6 +368,9 @@ class Server:
                     if m["t"] == "ping":
                         if isinstance(m.get("id"), int) and not isinstance(m["id"], bool):
                             await ws.send(json.dumps({"t": "pong", "id": m["id"]}))
+                    elif m["t"] == "cu_stop":
+                        if self.assistant:
+                            self.assistant.cu.stop("user")  # no session: ignored
                     elif m["t"] in CHAT_TYPES:
                         # chat runs in its own task; handle() only starts or cancels it
                         if chat:
@@ -363,6 +378,8 @@ class Server:
                         elif m["t"] == "chat":
                             await send({"t": "chat_error", "id": m.get("id"), "msg": "AI isn't set up on this PC"})
                     else:
+                        if self.assistant and self.assistant.cu.active and cu.is_takeover(m):
+                            self.assistant.cu.stop("touched")  # Osian took over; his input still applies
                         queue.put_nowait(m)
                 except asyncio.QueueFull:
                     log.warning("input queue full, dropping %r", raw[:80])
@@ -372,6 +389,8 @@ class Server:
             pass
         finally:
             if chat:
+                if self.assistant.cu.active and self.assistant.cu.send is send:
+                    self.assistant.cu.stop("disconnected")
                 await chat.cancel()
             worker.cancel()
             try:
@@ -420,7 +439,8 @@ async def amain(args):
     vin = VirtualInput(args.layout, paster)
     cfg = ai.load_config()
     input_lock = asyncio.Lock()
-    assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore()) if cfg else None
+    assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore(),
+                             desktop=cu.HyprDesktop(vin, input_lock)) if cfg else None
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
     srv = Server(vin, token, args.max_step, assistant, input_lock)
