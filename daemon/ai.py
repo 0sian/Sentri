@@ -34,6 +34,11 @@ USAGE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "sta
 
 MAX_CHAT_CHARS = 4000
 MAX_TOOL_ROUNDS = 8
+# Moods the model may pick (PROTOCOL-AI chat_mood). thinking/alert/sleepy exist on the phone
+# too, but the phone drives those from state.
+MOODS = ("neutral", "attentive", "surprised", "excited", "happy", "laughing", "angry", "sad", "scared",
+         "suspicious", "confused", "curious", "proud", "shy", "unimpressed")
+MOOD_TAG_LIMIT = 24  # give up looking for a leading [mood:...] tag after this many characters
 _call_ids = itertools.count(1)  # "call" ids are unique for the daemon's lifetime
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 
@@ -50,6 +55,10 @@ asterisks for bold, no backticks, no # headings, no tables. If a list really hel
 item on its own line starting with a plain hyphen.
 - Be friendly and direct. Give real answers and honest assessments rather than reassurance. If you don't know something, say so.
 - Use British English.
+- Only when your reply carries real feeling (a joke, good or bad news, a refusal, a surprise), \
+start it with a mood tag such as [mood:happy]. Pick one of: neutral attentive surprised excited happy \
+laughing angry sad scared suspicious confused curious proud shy unimpressed. \
+Otherwise leave the tag out. Osian never sees the tag; it sets the cloud's expression.
 
 What you can do on the PC, with your tools: open installed apps, change or mute the volume, \
 play, pause or skip media, check the time, volume, what's playing and the focused window, \
@@ -167,6 +176,53 @@ class AnthropicBackend:
         return Reply([b.to_dict() for b in final.content], final.stop_reason, tokens_in, u.output_tokens)
 
 
+class MoodFilter:
+    """Strips a leading [mood:x] tag from one streamed reply (one API round).
+    Holds back the start of the stream until the tag closes, or until it's clear there
+    isn't one (first non-space char isn't '[', or MOOD_TAG_LIMIT chars without ']').
+    A bracketed start that isn't a mood tag (e.g. "[1] ...") is passed through untouched;
+    a mood tag with an unusable value is still removed, so it never reaches the phone."""
+
+    def __init__(self, emit, on_mood):
+        self.emit, self.on_mood = emit, on_mood
+        self.buf = ""
+        self.passing = False
+
+    async def feed(self, chunk: str):
+        if self.passing:
+            await self.emit(chunk)
+            return
+        self.buf += chunk
+        head = self.buf.lstrip()
+        if not head:
+            return
+        if not head.startswith("["):
+            return await self._release(self.buf)
+        end = head.find("]")
+        if end == -1:
+            if len(head) > MOOD_TAG_LIMIT:
+                await self._release(self.buf)
+            return
+        tag, rest = head[1:end].strip().lower(), head[end + 1:]
+        if not tag.startswith("mood:"):
+            return await self._release(self.buf)
+        mood = tag[5:].strip()
+        if mood in MOODS:
+            await self.on_mood(mood)
+        await self._release(rest.lstrip())
+
+    async def finish(self):
+        """End of the round: whatever is still held back was ordinary text."""
+        if not self.passing and self.buf.strip():
+            await self._release(self.buf)
+
+    async def _release(self, text: str):
+        self.passing = True
+        self.buf = ""
+        if text:
+            await self.emit(text)
+
+
 class Assistant:
     """The conversation, shared by whichever phone is connected. One turn at a time."""
 
@@ -189,7 +245,7 @@ class Assistant:
     def reset(self):
         self.history.clear()
 
-    async def turn(self, text: str, on_text, on_tool=None) -> dict:
+    async def turn(self, text: str, on_text, on_tool=None, on_mood=None) -> dict:
         """Run one claimed turn, including up to MAX_TOOL_ROUNDS rounds of tool calls.
         Returns usage {"in","out"}; raises ChatError or CancelledError. on_tool(dict) gets
         {"call","name","summary","state"[,"detail"]} events. The history is only ever appended
@@ -200,16 +256,26 @@ class Assistant:
         shown = []         # text streamed to the phone in the current round
         used = {"in": 0, "out": 0}
 
+        mood_sent = False
+
         async def emit(s):
             shown.append(s)
             await on_text(s)
+
+        async def mood(m):
+            nonlocal mood_sent
+            if on_mood and not mood_sent:  # at most one per turn
+                mood_sent = True
+                await on_mood(m)
 
         try:
             for round_no in range(MAX_TOOL_ROUNDS + 1):
                 self._check_budget()
                 shown.clear()
+                tags = MoodFilter(emit, mood)  # each round is a new reply that may open with a tag
                 reply = await self.backend.complete(SYSTEM_PROMPT, self.history + [user] + done,
-                                                    emit, self.tool_defs)
+                                                    tags.feed, self.tool_defs)
+                await tags.finish()
                 used["in"] += reply.tokens_in
                 used["out"] += reply.tokens_out
                 self._add_usage(reply.tokens_in + reply.tokens_out)
@@ -346,7 +412,8 @@ class ChatSession:
         try:
             usage = await self.assistant.turn(
                 text, lambda s: self.send({"t": "chat_delta", "id": tid, "text": s}),
-                lambda ev: self.send({"t": "tool", "id": tid, **ev}))
+                lambda ev: self.send({"t": "tool", "id": tid, **ev}),
+                lambda m: self.send({"t": "chat_mood", "id": tid, "mood": m}))
             await self.send({"t": "chat_done", "id": tid, "usage": usage})
         except ChatError as ex:
             await self.send({"t": "chat_error", "id": tid, "msg": str(ex)})

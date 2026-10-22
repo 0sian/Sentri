@@ -36,6 +36,7 @@ Unknown fields/messages must be ignored by both sides.
 | `confirm_req` | `id`, `call`, `name`, `summary`, `risk` (`low`/`high`), `timeout` (s) | ask the user to approve one specific action |
 | `chat_done` | `id`, `usage?` `{"in":int,"out":int}`, `cancelled?` | turn finished. Exactly one of `chat_done` / `chat_error` ends every turn |
 | `chat_error` | `id`, `msg` (short, user-readable) | turn failed (API error, budget reached, busy, ...) |
+| `chat_mood` | `id`, `mood` | optional, at most once per turn, sent as early as possible (before the first `chat_delta` when the reply opens with it). One of: neutral attentive surprised excited happy laughing angry sad scared suspicious confused curious proud shy unimpressed (`thinking`/`alert`/`sleepy` are phone-driven, never sent). Unknown values are ignored by the phone. Added 2026-10-22 |
 
 Ordering for a turn: any mix of `chat_delta` / `tool` / `confirm_req`, then exactly one `chat_done` or `chat_error`.
 After a `confirm_req`, the daemon **always** follows with a `tool` event for that `call` (running/ok/error if
@@ -95,3 +96,8 @@ behaviour the spec leaves open. None of them adds a message or field:
    while the old connection's turn is being cancelled.
 6. **Phase C note:** `type_text` / `press_keys` go through the same ordered input queue as the phone's
    own `text`/`key` messages, so tool typing never interleaves with your typing.
+7. **Mood tags.** The model opens an emotional reply with `[mood:x]`. The daemon holds back the start
+   of each reply until the tag closes (or 24 chars pass with no `]`), strips it, and sends
+   `chat_mood`. The tag never appears in `chat_delta` or anything the phone shows. It *is* kept in the
+   model-side context: stripping it would mean editing the model's own output before re-sending it
+   (the history-editing check), and without seeing its earlier tags the model tends to stop using them.

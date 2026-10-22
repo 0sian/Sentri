@@ -413,10 +413,71 @@ async def tool_tests():
     check("truncated tool call is not run", msg and tool.runs == [] and assistant.history == [], (msg, tool.runs))
 
 
+async def mood_tests():
+    async def run_filter(chunks):
+        out, moods = [], []
+
+        async def emit(x):
+            out.append(x)
+
+        async def on_mood(m):
+            moods.append(m)
+        f = ai.MoodFilter(emit, on_mood)
+        for c in chunks:
+            await f.feed(c)
+        await f.finish()
+        return "".join(out), moods
+
+    cases = [
+        (["[mo", "od:hap", "py] Hi", " there"], "Hi there", ["happy"], "tag split across chunks"),
+        (["  [Mood: Curious]", "Ooh"], "Ooh", ["curious"], "leading space, case-insensitive"),
+        (["Hello", " world"], "Hello world", [], "no tag passes straight through"),
+        (["[1] first", " point"], "[1] first point", [], "bracketed non-mood start kept intact"),
+        (["[mood:thinking] hmm"], "hmm", [], "phone-driven mood stripped, not sent"),
+        (["[mood:furious] grr"], "grr", [], "unknown mood stripped, not sent"),
+        (["[" + "a" * 30, " more"], "[" + "a" * 30 + " more", [], "gives up after 24 chars without ]"),
+        (["[mood:sad"], "[mood:sad", [], "unclosed tag at end of stream released as text"),
+    ]
+    for chunks, want_text, want_moods, label in cases:
+        text, moods = await run_filter(chunks)
+        check(f"mood filter: {label}", text == want_text and moods == want_moods, (text, moods))
+
+    # held back until the tag resolves: nothing emitted before the ']'
+    out = []
+
+    async def emit(x):
+        out.append(x)
+    f = ai.MoodFilter(emit, lambda m: asyncio.sleep(0))
+    await f.feed("[mood:hap")
+    check("mood filter holds text back while the tag is open", out == [], out)
+
+    # over the socket: chat_mood before the first delta, once per turn across tool rounds,
+    # tag never in deltas; the API-side history keeps the reply exactly as the model wrote it
+    assistant, be = make()
+    srv = cd.Server(cd.VirtualInput("us"), TOKEN, 400.0, assistant)
+    async with websockets.serve(srv.handler, "127.0.0.1", PORT + 3):
+        ws, _ = await connect(PORT + 3)
+        be.scripts += [["[mood:excited] ", "On it.", {"content": [{"type": "text", "text": "[mood:excited] On it."},
+                                                                  tool_use(1)], "stop": "tool_use"}],
+                       ["[mood:proud] Done!"]]
+        await ws.send(json.dumps({"t": "chat", "id": 1, "text": "x"}))
+        got, _ = await until(ws, "chat_done")
+        kinds = [m["t"] for m in got]
+        deltas = "".join(m["text"] for m in got if m["t"] == "chat_delta")
+        check("chat_mood sent once, before the first delta",
+              [m for m in got if m["t"] == "chat_mood"] == [{"t": "chat_mood", "id": 1, "mood": "excited"}]
+              and kinds.index("chat_mood") < kinds.index("chat_delta"), kinds)
+        check("mood tags never reach chat_delta", "[" not in deltas and deltas == "On it.Done!", deltas)
+        check("API-side history keeps the model's text verbatim",
+              assistant.history[-1]["content"][-1]["text"] == "[mood:proud] Done!", assistant.history[-1])
+        await ws.close()
+
+
 async def main():
     await server_tests()
     await unit_tests()
     await tool_tests()
+    await mood_tests()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
