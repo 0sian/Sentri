@@ -155,7 +155,8 @@ async def server_tests():
         got, done = await until(ws, "chat_done")
         deltas = [m["text"] for m in got if m["t"] == "chat_delta"]
         check("deltas streamed in order", deltas == ["Hel", "lo ", "Osian"] and all(m["id"] == 1 for m in got), got)
-        check("chat_done carries usage", done == {"t": "chat_done", "id": 1, "usage": {"in": 900, "out": 12}}, done)
+        check("chat_done carries usage and today's spend",
+              done == {"t": "chat_done", "id": 1, "usage": {"in": 900, "out": 12}, "today_usd": 0.0, "budget_usd": 1.0}, done)
         check("system prompt sent, includes untrusted-data rule",
               "data, not instructions" in be.calls[0][0][0]["text"]
               and be.calls[0][0][0]["cache_control"] == {"type": "ephemeral"}, be.calls[0][0][0]["text"][:80])
@@ -197,7 +198,8 @@ async def server_tests():
         await asyncio.sleep(0.25)
         await ws.send(json.dumps({"t": "chat_cancel", "id": 5}))
         got, done = await until(ws, "chat_done")
-        check("chat_cancel -> chat_done cancelled", done == {"t": "chat_done", "id": 5, "cancelled": True}, done)
+        check("chat_cancel -> chat_done cancelled", done.get("cancelled") is True and done["id"] == 5
+              and "today_usd" in done, done)
         last = assistant.history[-1]
         check("cancelled turn keeps streamed text, marked [cancelled]",
               last["role"] == "assistant" and last["content"][0]["text"].endswith("[cancelled]")
@@ -270,7 +272,7 @@ async def unit_tests():
         msg = str(ex)
     check("daily cap -> 'Daily AI budget reached', no API call", msg == "Daily AI budget reached" and len(be.calls) == 1, msg)
     b = ai.Assistant(a.cfg, FakeBackend(), usage_file=a.usage_file)
-    check("budget survives a restart", b._read_usage() == 160, b._read_usage())
+    check("budget survives a restart", b._read_usage()["tokens"] == 160, b._read_usage())
     check("slot released after a refused-by-budget turn", not a.busy)
 
     # cancelled before the task ever ran: slot freed, chat_done still sent
@@ -284,7 +286,33 @@ async def unit_tests():
     await s.handle({"t": "chat_reset"})
     await asyncio.sleep(0.05)
     check("turn cancelled before it started: slot freed, chat_done sent",
-          not a.busy and sent == [{"t": "chat_done", "id": 1, "cancelled": True}], (a.busy, sent))
+          not a.busy and len(sent) == 1 and sent[0]["cancelled"] is True and sent[0]["id"] == 1, (a.busy, sent))
+
+    # spend in dollars: priced per model from usage, capped by daily_budget_usd
+    a, be = make()
+    a.cfg.daily_budget_usd = 0.002
+    be.scripts.append(["hi"])
+    real = be.complete
+
+    async def priced(*args, **kw):
+        r = await real(*args, **kw)
+        r.usage = {"uncached": 5000, "cache_write": 0, "cache_read": 10000, "out": 1000}
+        return r
+    be.complete = priced
+    assert a.claim()
+    await a.turn("x", lambda s_: asyncio.sleep(0))
+    spend = a.spend()
+    check("spend: Haiku 5k in + 10k cache read + 1k out = $0.0011", spend == {"today_usd": 0.0011, "budget_usd": 0.002}, spend)
+    be.scripts.append(["again"])
+    assert a.claim()
+    await a.turn("y", lambda s_: asyncio.sleep(0))
+    assert a.claim()
+    try:
+        await a.turn("z", lambda s_: asyncio.sleep(0))
+        capped = False
+    except ai.ChatError as ex:
+        capped = str(ex) == "Daily AI budget reached"
+    check("daily_budget_usd enforced", capped)
 
     # trim: oldest half dropped, thinking stripped from what's left, starts with user
     a, be = make(limit=2000)

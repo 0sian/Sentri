@@ -320,6 +320,24 @@ async def limit_tests():
     _, r, _ = await run(shots, max_actions=3)
     check("action limit -> limit", r == ["limit"], r)
     _, r, _ = await run(shots, budget_usd=0.01)  # each fake call costs ~$0.003
+
+    # session spend lands in the daily dollar total; actions are audited with the session id
+    import audit
+    a, be, desk = make()
+    a.audit = audit.AuditLog(TMP / f"audit-{os.urandom(3).hex()}.jsonl")
+    be.sess[:] = [{"content": [act("left_click", coordinate=[5, 5])]}, {"content": [end()]}]
+    be.main[:] = [start_call(), {"content": [{"type": "text", "text": "ok"}]}]
+
+    async def allow(*x):
+        return (True, None)
+    assert a.claim()
+    await a.turn("go", lambda s: asyncio.sleep(0), lambda e: asyncio.sleep(0), None, allow)
+    rows = a.audit.tail(10)
+    check("session + chat costs in today's dollars (2 Sonnet calls $0.006 + 2 Haiku calls $0.0003)",
+          a.spend()["today_usd"] == 0.0063, a.spend())
+    check("audit: session actions carry the session id; the start call is 'allowed'",
+          [(r["tool"], r["approval"], r["result"], bool(r.get("session"))) for r in rows] ==
+          [("left_click", "allowed", "ok", True), ("start_computer_use", "allowed", "ok", False)], rows)
     check("spend cap -> limit", r == ["limit"], r)
     a, be, desk = make(secs=30)
     be.delay = 0.05

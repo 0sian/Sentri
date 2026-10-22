@@ -13,6 +13,7 @@ separate model looks at the screen and clicks for a short, time-boxed, visible s
   cancel/reset, disconnect, an error, or Osian touching the trackpad/keyboard on the phone.
 """
 import asyncio
+import datetime
 import json
 import logging
 import math
@@ -302,8 +303,9 @@ class Session:
                 self.check_daily()
                 reply = await self.backend.complete(SYSTEM, messages, _ignore, self.tools,
                                                     model=self.cfg.model, effort=self.cfg.effort)
-                self.spent += cost_usd(self.cfg.model, reply.usage)
-                self.add_daily(reply.tokens_in + reply.tokens_out)
+                cost = cost_usd(self.cfg.model, reply.usage or {})
+                self.spent += cost
+                self.add_daily(reply.tokens_in + reply.tokens_out, cost)
                 if reply.stop_reason == "refusal":
                     raise SessionEnded("error", "The model declined to carry on.")
                 last_text = " ".join(b.get("text", "") for b in reply.content if b.get("type") == "text") or last_text
@@ -402,7 +404,7 @@ class Session:
             "middle_click": f"Middle-click{at}", "double_click": f"Double-click{at}",
             "triple_click": f"Triple-click{at}", "left_click_drag": f"Drag to{at}",
             "scroll": f"Scroll {a.get('scroll_direction', '')}{at}",
-            "type": f'Type "{clean(str(a.get("text", "")), 60)}"', "key": f"Press {clean(str(a.get('text', '')), 40)}",
+            "type": f'Type "{clean(str(a.get("text", "")), 40)}"', "key": f"Press {clean(str(a.get('text', '')), 40)}",
             "wait": "Wait",
         }.get(name, clean(str(name), 40))
 
@@ -614,12 +616,14 @@ class StartComputerUse(pc_tools.Tool):
         if self.controller.active:
             raise ToolError("a computer-use session is already running")
 
+        sid = f"cu-{datetime.datetime.now():%Y%m%d-%H%M%S}"
+
         async def events(call, name, summary, state, detail=None):
             if progress:
                 kw = {"call": call, "name": name, "summary": summary, "state": state}
                 if detail:
                     kw["detail"] = detail
-                await progress(**kw)
+                await progress(session=sid, **kw)
 
         s = Session(self.cfg, self.backend, self.desktop, a["goal"], events, self.check_daily, self.add_daily,
                     self.open_url, self.on_confirm)

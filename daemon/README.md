@@ -125,3 +125,15 @@ api = "/api/4"        # "/api/3" if the homelab runs Glances 3
 # user = "..."        # only if Glances was started with --password
 # password = "..."
 ```
+
+## Spend, audit log, token, Wake-on-LAN
+
+- `daily_budget_usd` in ai.toml (default 1.0, 0 = off) caps estimated spend per day across chat
+  and computer use; the phone shows "Spent today".
+- Everything the AI does is logged to `~/.local/state/companion/audit.jsonl` (no screenshots,
+  clipboard or command output; typed text cut to 40 chars). Ask the AI "what did you do?".
+- `companion_daemon.py --rotate-token` makes a new pairing token (restart the service and
+  re-pair the phone afterwards). Failed logins from one address are rate-limited.
+- The phone's Wake PC button appears only once Wake-on-LAN is enabled on the wired NIC:
+  `nmcli c modify "Wired connection 1" 802-3-ethernet.wake-on-lan magic`, reconnect, and enable
+  wake-on-LAN / "Resume by PCI-E" (and disable ErP) in the BIOS.

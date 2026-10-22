@@ -12,13 +12,17 @@ Run:  ./companion_daemon.py            (see README for the uinput permission set
 """
 import argparse
 import asyncio
+import signal
+import time
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,6 +30,7 @@ import websockets
 from evdev import UInput, ecodes as e
 
 import ai
+import audit
 import cu
 import keymap
 import memory
@@ -268,14 +273,84 @@ class VirtualInput:
         self.ui.close()
 
 
-def load_or_create_token() -> str:
+MIN_TOKEN_BITS = 128
+
+
+def write_new_token() -> str:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    if TOKEN_FILE.exists():
-        return TOKEN_FILE.read_text().strip()
-    token = secrets.token_urlsafe(24)
-    TOKEN_FILE.write_text(token + "\n")
-    TOKEN_FILE.chmod(0o600)
+    token = secrets.token_urlsafe(24)  # 192 bits
+    tmp = TOKEN_FILE.with_suffix(".tmp")
+    tmp.write_text(token + "\n")
+    tmp.chmod(0o600)
+    tmp.replace(TOKEN_FILE)
     return token
+
+
+def token_bits(token: str) -> int:
+    """Entropy estimate for a token we generated: base64url, 6 bits a character."""
+    return len(token) * 6
+
+
+def load_or_create_token() -> str:
+    if not TOKEN_FILE.exists():
+        return write_new_token()
+    token = TOKEN_FILE.read_text().strip()
+    if token_bits(token) < MIN_TOKEN_BITS:
+        log.warning("the pairing token is only ~%d bits; run companion_daemon.py --rotate-token "
+                    "and re-pair the phone", token_bits(token))
+    return token
+
+
+def wol_mac(sys_net: Path = Path("/sys/class/net"), route: str = None):
+    """MAC of the interface carrying the default route, but only if Wake-on-LAN can work there:
+    a wired NIC whose kernel wakeup flag is enabled (what `ethtool -s <dev> wol g` sets; reading
+    the Wake-on mode itself needs root). None otherwise, so the phone doesn't offer a dead button."""
+    if route is None:
+        try:
+            route = subprocess.run(["ip", "route", "get", "1.1.1.1"], capture_output=True, text=True, timeout=2).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+    m = re.search(r"\bdev (\S+)", route)
+    if not m:
+        return None
+    dev = sys_net / m.group(1)
+    try:
+        wired = (dev / "type").read_text().strip() == "1" and not (dev / "wireless").exists() \
+            and (dev / "device").exists()
+        wake = (dev / "device" / "power" / "wakeup").read_text().strip() == "enabled"
+        mac = (dev / "address").read_text().strip()
+    except OSError:
+        return None
+    return mac if wired and wake and re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", mac) else None
+
+
+class AuthLimiter:
+    """Slows down token guessing from one address: after 5 failures wait 30 s between tries,
+    after 20 wait 10 minutes. A success, or an hour without failures, clears the count."""
+    STEPS = ((20, 600), (5, 30))
+    FORGET = 3600
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.fails = {}  # ip -> (count, time of last failure)
+
+    def wait(self, ip) -> float:
+        count, last = self.fails.get(ip, (0, 0.0))
+        elapsed = self.clock() - last
+        if count and elapsed > self.FORGET:
+            del self.fails[ip]
+            return 0.0
+        for threshold, delay in self.STEPS:
+            if count >= threshold:
+                return max(0.0, delay - elapsed)
+        return 0.0
+
+    def failed(self, ip):
+        count, _ = self.fails.get(ip, (0, 0.0))
+        self.fails[ip] = (count + 1, self.clock())
+
+    def succeeded(self, ip):
+        self.fails.pop(ip, None)
 
 
 def lan_ip() -> str:
@@ -318,9 +393,16 @@ class Server:
         self.max_step = max_step
         self.assistant = assistant  # None when no API key is configured
         self.active = None  # only one controlling client at a time
+        self.limiter = AuthLimiter()
 
     async def handler(self, ws):
         peer = ws.remote_address
+        ip = peer[0] if peer else "?"
+        wait = self.limiter.wait(ip)
+        if wait:
+            log.warning("refusing %s for another %.0f s after repeated failed logins", ip, wait)
+            await ws.close(code=1008, reason="too many failed logins; try later")
+            return
         nonce = secrets.token_hex(16)
         try:
             await ws.send(json.dumps({"t": "challenge", "nonce": nonce}))
@@ -328,11 +410,13 @@ class Server:
             msg = json.loads(raw)
             expected = hmac.new(self.token, nonce.encode(), hashlib.sha256).hexdigest()
             if msg.get("t") != "auth" or not hmac.compare_digest(str(msg.get("hmac", "")), expected):
+                self.limiter.failed(ip)
                 await ws.send(json.dumps({"t": "denied"}))
-                log.warning("auth failed from %s", peer)
+                log.warning("auth failed from %s (%d recent failures)", ip, self.limiter.fails[ip][0])
                 return
         except (asyncio.TimeoutError, json.JSONDecodeError, websockets.ConnectionClosed):
             return
+        self.limiter.succeeded(ip)
 
         # newest client wins; kick the old one so a dropped connection never blocks you
         if self.active is not None and self.active is not ws:
@@ -343,6 +427,9 @@ class Server:
         self.active = ws
         await asyncio.to_thread(self.vin.refresh_keymap)
         ok = {"t": "ok", "host": socket.gethostname()}
+        mac = await asyncio.to_thread(wol_mac)
+        if mac:
+            ok["mac"] = mac  # the phone's Wake PC button
         if self.assistant:
             caps = ["chat"] + (["cu"] if "start_computer_use" in self.assistant.tools else [])
             ok.update(caps=caps, model=self.assistant.cfg.model)
@@ -440,19 +527,28 @@ async def amain(args):
     cfg = ai.load_config()
     input_lock = asyncio.Lock()
     assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore(),
-                             desktop=cu.HyprDesktop(vin, input_lock)) if cfg else None
+                             desktop=cu.HyprDesktop(vin, input_lock), audit=audit.AuditLog()) if cfg else None
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
     srv = Server(vin, token, args.max_step, assistant, input_lock)
+    mac = wol_mac()
+    log.info("Wake-on-LAN %s", f"available: telling the phone {mac}" if mac else
+             "not set up on the wired interface (or not wired), so the phone won't offer Wake PC")
     ip = lan_ip()
     print(f"\nCompanion daemon listening on ws://{args.host}:{args.port}  (layout: {args.layout})")
     print(f"  LAN address : {ip}:{args.port}")
     print(f"  Token       : {token}")
     print(f"  Token file  : {TOKEN_FILE}\n")
+    # systemd stops us with SIGTERM: leave the serve() block properly so every phone gets a
+    # 1001 "going away" close (it reconnects on anything but 4000) instead of a dropped socket
+    stop = asyncio.get_running_loop().create_future()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        asyncio.get_running_loop().add_signal_handler(sig, lambda: stop.done() or stop.set_result(None))
     try:
         async with websockets.serve(srv.handler, args.host, args.port,
                                     ping_interval=15, ping_timeout=10, max_size=64 * 1024):
-            await asyncio.Future()
+            await stop
+        log.info("shutting down")
     finally:
         vin.close()
 
@@ -469,9 +565,15 @@ def main():
     p.add_argument("--max-step", type=float, default=400.0,
                    help="clamp on a single movement/scroll message (safety)")
     p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("--rotate-token", action="store_true",
+                   help="replace the pairing token with a new 192-bit one, print it and exit "
+                        "(then restart the service and re-pair the phone)")
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    if args.rotate_token:
+        print(f"New token: {write_new_token()}\nRestart the service and enter it in the phone app.")
+        return
     try:
         asyncio.run(amain(args))
     except PermissionError:

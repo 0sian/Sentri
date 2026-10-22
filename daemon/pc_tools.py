@@ -218,6 +218,44 @@ def installed_apps() -> list:
     return apps
 
 
+def resolve_app(want) -> DesktopApp:
+    """One visible, launchable app by name, desktop id or kind, or a ToolError listing choices."""
+    if not isinstance(want, str) or not 0 < len(want.strip()) <= 100:
+        raise ToolError("app must be a non-empty name")
+    shown = want
+    want = want.strip().lower()
+    apps = installed_apps()
+    exact = [a for a in apps if want in (a.name.lower(), a.id.lower().removesuffix(".desktop"))]
+    matches = (exact or [a for a in apps if want in a.name.lower()]
+               or [a for a in apps if want in a.generic.lower() or a.generic.lower() in (want, want + "s")])
+    if not matches:
+        raise ToolError(f"no installed app called {clean(shown, 60)!r}")
+    if len({a.name for a in matches}) > 1:
+        names = sorted({a.name for a in matches})[:8]
+        raise ToolError("several apps match: " + ", ".join(clean(n, 40) for n in names))
+    return matches[0]
+
+
+async def find_window(app: DesktopApp):
+    """Address of an open window belonging to app (Hyprland), else None."""
+    if not _hyprland():
+        return None
+    classes = app.window_classes()
+    for c in await _hypr_json("clients"):
+        if str(c.get("class", "")).lower() in classes and ADDRESS.match(str(c.get("address", ""))):
+            return c["address"]
+    return None
+
+
+async def default_browser():
+    """The DesktopApp handling http(s) links, or None if it can't be worked out."""
+    try:
+        app_id = (await run("xdg-settings", "get", "default-web-browser")).strip()
+    except ToolError:
+        return None
+    return next((a for a in installed_apps() if a.id == app_id), None)
+
+
 class LaunchApp(Tool):
     name = "launch_app"
     description = ("Open an installed desktop app by name (\"Firefox\", \"Spotify\") or kind (\"file manager\"). "
@@ -230,34 +268,15 @@ class LaunchApp(Tool):
     fallback_summary = "Open an app"
 
     def validate(self, args):
-        want = args.get("app")
-        if not isinstance(want, str) or not 0 < len(want.strip()) <= 100:
-            raise ToolError("app must be a non-empty name")
-        want = want.strip().lower()
-        apps = installed_apps()
-        exact = [a for a in apps if want in (a.name.lower(), a.id.lower().removesuffix(".desktop"))]
-        matches = (exact or [a for a in apps if want in a.name.lower()]
-                   or [a for a in apps if want in a.generic.lower() or a.generic.lower() in (want, want + "s")])
-        if not matches:
-            raise ToolError(f"no installed app called {clean(args['app'], 60)!r}")
-        if len({a.name for a in matches}) > 1:
-            names = sorted({a.name for a in matches})[:8]
-            raise ToolError("several apps match: " + ", ".join(clean(n, 40) for n in names))
         new = args.get("new_window", False)
         if not isinstance(new, bool):
             raise ToolError("new_window must be true or false")
-        return {"app": matches[0], "new_window": new}
+        return {"app": resolve_app(args.get("app")), "new_window": new}
 
     async def prepare(self, args):
         """Look for an open window of the app now, so the summary says what will really happen."""
         a = self.validate(args)
-        a["existing"] = None
-        if not a["new_window"] and _hyprland():
-            classes = a["app"].window_classes()
-            for c in await _hypr_json("clients"):
-                if str(c.get("class", "")).lower() in classes and ADDRESS.match(str(c.get("address", ""))):
-                    a["existing"] = c["address"]
-                    break
+        a["existing"] = None if a["new_window"] else await find_window(a["app"])
         return a
 
     def summary(self, args):
@@ -602,9 +621,12 @@ class CloseWindow(Tool):
 
 class OpenUrl(Tool):
     name = "open_url"
-    description = ("Open an http(s) link in Osian's default browser. Needs his approval unless the "
-                   "site is on his allowlist.")
-    schema = _schema({"url": {"type": "string"}}, ["url"])
+    description = ("Open an http(s) link in a browser: his default browser, or the browser named in app "
+                   "(e.g. \"Firefox\"). If that browser is already open, its window is focused first. The "
+                   "result says which browser it opened in. Needs his approval unless the site is on his allowlist.")
+    schema = _schema({"url": {"type": "string"},
+                      "app": {"type": "string", "description": "optional browser to use instead of the default"}},
+                     ["url"])
     fallback_summary = "Open a link in the browser"
     risk = "low"
 
@@ -629,7 +651,16 @@ class OpenUrl(Tool):
             is_ip = False
         port = f":{u.port}" if u.port else ""
         rest = u.path + (f"?{u.query}" if u.query else "")
-        return {"url": url, "host": host, "is_ip": is_ip, "shown": host + port + rest}
+        browser = resolve_app(args["app"]) if args.get("app") is not None else None
+        return {"url": url, "host": host, "is_ip": is_ip, "shown": host + port + rest, "browser": browser}
+
+    async def prepare(self, args):
+        """Work out the browser (named, else the default) and whether it already has a window."""
+        a = self.validate(args)
+        if a["browser"] is None:
+            a["browser"] = await default_browser()
+        a["existing"] = await find_window(a["browser"]) if a["browser"] else None
+        return a
 
     def risk_for(self, a):
         h = a["host"]
@@ -637,11 +668,20 @@ class OpenUrl(Tool):
         return None if allowed else "low"
 
     def summary(self, a):
-        return f"Open {clean(a['shown'], 140)} in your browser"
+        where = clean(a["browser"].name, 40) if a.get("browser") else "your browser"
+        return f"Open {clean(a['shown'], 140)} in {where}"
 
     async def run(self, a):
-        await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", "xdg-open", a["url"])
-        return f"Opened {a['host']} in the browser"
+        browser = a.get("browser")
+        if a.get("existing"):
+            try:
+                await _focus_address(a["existing"])  # bring it forward so the new tab is visible
+            except ToolError:
+                pass
+        # Own systemd scope, as with launch_app; the URL is one argv item (already checked http/https)
+        launcher = ["gtk-launch", browser.id, a["url"]] if browser else ["xdg-open", a["url"]]
+        await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", *launcher)
+        return f"Opened {a['host']} in {clean(browser.name, 40) if browser else 'the default browser'}"
 
 
 class Screenshot(Tool):
@@ -1109,6 +1149,29 @@ def _glances_summary(sec: str, d) -> str:
         more = f"\n(+{len(rows) - 30} more)" if len(rows) > 30 else ""
         return "\n".join(out) + more if out else "No containers"
     return "no data"
+
+
+class RecentActions(Tool):
+    name = "recent_actions"
+    description = ("What you (the AI) did on the PC recently: the last n tool calls from the audit log, with "
+                   "time, what, whether Osian approved it and whether it worked. For \"what did you do?\" questions.")
+    schema = _schema({"n": {"type": "integer", "description": "how many, 1-50 (default 10)"}})
+    fallback_summary = "Check what I did recently"
+    untrusted_output = True  # summaries can quote window titles
+
+    def __init__(self, log):
+        self.log = log
+
+    def validate(self, args):
+        return {"n": _int(args.get("n", 10), 1, 50, "n")}
+
+    async def run(self, a):
+        rows = self.log.tail(a["n"])
+        if not rows:
+            return "Nothing in the audit log yet"
+        return "\n".join(f"{r.get('ts', '')[:16].replace('T', ' ')} {r.get('tool')}: {clean(r.get('summary', ''), 160)} "
+                         f"[{r.get('approval')}, {r.get('result')}]" + (f" ({r['session']})" if r.get("session") else "")
+                         for r in rows)
 
 
 def registry(injector=None, allow_hosts=(), commands=(), routines=None, store=None, tainted=None,

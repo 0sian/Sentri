@@ -313,6 +313,30 @@ async def confirm_tier_tests():
     out = await la.run(a)
     check("window closed meanwhile -> launches after all", out == "Opened Firefox" and rec.argv[-1][0] == "systemd-run", rec.argv)
 
+    # --- open_url: names the browser, optional app, focuses an open browser window first ---
+    rec.answers = {"xdg-settings get default-web-browser": "vivaldi-stable.desktop\n",
+                   "hyprctl clients": __import__("json").dumps(clients), "hyprctl dispatch hl.dsp.focus": "ok"}
+    ou = t.OpenUrl()
+    a = await ou.prepare({"url": "https://www.atlasobscura.com/places"})
+    check("open_url: card names the default browser", ou.summary(a) == "Open www.atlasobscura.com/places in Vivaldi",
+          ou.summary(a))
+    rec.argv.clear()
+    out = await ou.run(a)
+    check("open_url: focuses the open browser, opens via its .desktop entry, result names it",
+          rec.argv[0] == ["hyprctl", "dispatch", "hl.dsp.focus({window='address:0xdef'})"]
+          and rec.argv[1][-3:] == ["gtk-launch", "vivaldi-stable.desktop", "https://www.atlasobscura.com/places"]
+          and out == "Opened www.atlasobscura.com in Vivaldi", (rec.argv, out))
+    a = await ou.prepare({"url": "https://example.com/", "app": "firefox"})
+    check("open_url: app picks another browser (validated against installed apps)",
+          ou.summary(a) == "Open example.com/ in Firefox" and a["existing"] == "0xabc", ou.summary(a))
+    check("open_url: unknown app rejected", rejects(ou, {"url": "https://example.com/", "app": "netscape"}))
+    rec.answers["xdg-settings get default-web-browser"] = t.ToolError("no xdg-settings")
+    a = await ou.prepare({"url": "https://example.com/"})
+    rec.argv.clear()
+    out = await ou.run(a)
+    check("open_url: default unknown -> xdg-open, says so", ou.summary(a) == "Open example.com/ in your browser"
+          and rec.argv[0][-2] == "xdg-open" and out == "Opened example.com in the default browser", (rec.argv, out))
+
     # --- registry ---
     reg = t.registry()
     check("without an injector there are no keyboard tools; no commands -> no run_named_command",

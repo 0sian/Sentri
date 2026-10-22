@@ -53,8 +53,17 @@ browser copy returns as plain text without its rich-text version). Daemon flag
 - On client disconnect, every held button and modifier is released.
 - Malformed messages are ignored and never kill the connection.
 
+### `ok` extras and close codes (2026-10-22, additive)
+- `ok` may carry `"mac":"aa:bb:cc:dd:ee:ff"`: the PC's wired MAC, sent **only** when Wake-on-LAN can
+  work (wired NIC on the default route, kernel wakeup flag enabled). Absent means: don't offer Wake PC.
+- Close codes from the daemon: `4000` replaced by another device (don't auto-reconnect); `1001`
+  daemon shutting down or restarting (SIGTERM is handled, so this is a real close frame);
+  `1008` refused because this address failed authentication too often (5 failures: 30 s;
+  20 failures: 10 min; cleared by a success or an hour without failures).
+
 ## Changes since v0.1
-- 2026-10-22: `ping` `id` / `pong` added (additive). The only change on the wire. The
+- 2026-10-22: `ping` `id` / `pong` added (additive).
+- 2026-10-22: `ok.mac` and close codes 1001/1008 (above), both additive. The
   keymap detection and paste fallback change what `text` produces on screen, not the messages.
 
 ## Proposed

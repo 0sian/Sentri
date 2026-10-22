@@ -11,6 +11,7 @@ ANTHROPIC_API_KEY. It is never logged and never sent to the phone.
     max_tokens = 4096
     effort = "low"                  # low | medium | high | xhigh | max
     daily_token_cap = 0             # input+output tokens per local day, 0 = no cap
+    daily_budget_usd = 1.0          # estimated spend per local day (chat + computer use), 0 = no cap
     history_token_limit = 30000     # trim old context once a turn's input exceeds this
     confirm_timeout = 60            # seconds to wait for Allow/Deny on the phone before denying
     open_url_allow = []             # hosts open_url may open without asking, e.g. ["youtube.com"]
@@ -132,6 +133,7 @@ class AIConfig:
     max_tokens: int = 4096
     effort: str = "low"
     daily_token_cap: int = 0
+    daily_budget_usd: float = 1.0
     history_token_limit: int = 30000
     confirm_timeout: int = 60
     open_url_allow: list = dataclasses.field(default_factory=list)
@@ -163,6 +165,7 @@ def load_config(path: Path = AI_CONFIG):
         "max_tokens": lambda v: isinstance(v, int) and 256 <= v <= 64000,
         "effort": lambda v: v in EFFORTS,
         "daily_token_cap": lambda v: isinstance(v, int) and v >= 0,
+        "daily_budget_usd": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0,
         "history_token_limit": lambda v: isinstance(v, int) and v >= 2000,
         "confirm_timeout": lambda v: isinstance(v, int) and 10 <= v <= 600,
         "open_url_allow": lambda v: isinstance(v, list) and all(isinstance(h, str) and h for h in v),
@@ -326,7 +329,7 @@ class Assistant:
     """The conversation, shared by whichever phone is connected. One turn at a time."""
 
     def __init__(self, cfg: AIConfig, backend=None, usage_file: Path = USAGE_FILE, tools=None, injector=None,
-                 store: memory.MemoryStore = None, desktop=None):
+                 store: memory.MemoryStore = None, desktop=None, audit=None):
         self.cfg = cfg
         self.backend = backend or AnthropicBackend(cfg)
         self.usage_file = usage_file
@@ -335,9 +338,12 @@ class Assistant:
         # window titles, command output). From then on remember needs approval, until reset.
         self.tainted = False
         self.cu = cu.Controller()
+        self.audit = audit  # audit.AuditLog, or None to keep no log
         if tools is None:
             tools = pc_tools.registry(injector, cfg.open_url_allow, cfg.commands, cfg.routines,
                                       store, lambda: self.tainted, cfg.homelab)
+        if audit is not None:
+            tools["recent_actions"] = pc_tools.RecentActions(audit)
         if cfg.cu and desktop is not None:
             tools["start_computer_use"] = cu.StartComputerUse(
                 cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
@@ -404,7 +410,7 @@ class Assistant:
                 await tags.finish()
                 used["in"] += reply.tokens_in
                 used["out"] += reply.tokens_out
-                self._add_usage(reply.tokens_in + reply.tokens_out)
+                self._add_usage(reply.tokens_in + reply.tokens_out, cu.cost_usd(self.cfg.model, reply.usage or {}))
                 if reply.stop_reason == "refusal":
                     raise ChatError("I can't help with that one.")
                 calls = [b for b in reply.content if b.get("type") == "tool_use"]
@@ -442,6 +448,10 @@ class Assistant:
             if on_tool:
                 await on_tool(kw)
 
+        def audit(tool_name, summary, approval, result, session=None):
+            if self.audit:
+                self.audit.record(tool_name, summary, approval, result, session)
+
         results = []
         for block in calls:
             call = pc_tools.next_call_id()
@@ -452,6 +462,7 @@ class Assistant:
                                 "content": f"unknown tool {name}"})
                 continue
             summary = tool.fallback_summary
+            approval = "auto"
             try:
                 args = await tool.prepare(block.get("input") or {})
                 limit = pc_tools.ROUTINE_SUMMARY_LIMIT if tool.name == "run_routine" else 200
@@ -461,20 +472,32 @@ class Assistant:
                                     if on_confirm else (False, "user"))
                     if allowed is not True:  # anything but an explicit yes is a no
                         await event(call=call, name=tool.name, summary=summary, state="denied", detail=why)
+                        audit(tool.name, summary, "timeout" if why == "timeout" else "denied", "not run")
                         results.append({"type": "tool_result", "tool_use_id": block["id"], "is_error": True,
                                         "content": DENIED[why]})
                         continue
+                    approval = "allowed"
                 await event(call=call, name=tool.name, summary=summary, state="running")
                 if tool.taints(args):
                     self.tainted = True
                 if getattr(tool, "wants_progress", False):
-                    out = await tool.run(args, progress=lambda **kw: event(**kw))
+                    # routine steps and computer-use actions: audited under the card that covered them
+                    async def progress(session=None, _approval=approval, **kw):
+                        await event(**kw)
+                        if kw["state"] in ("ok", "error"):
+                            audit(kw["name"], kw["summary"], _approval, kw["state"], session)
+                        elif kw["state"] == "denied":
+                            audit(kw["name"], kw["summary"], "timeout" if kw.get("detail") == "timeout" else "denied",
+                                  "not run", session)
+                    out = await tool.run(args, progress=progress)
                 else:
                     out = await tool.run(args)
                 await event(call=call, name=tool.name, summary=summary, state="ok")
+                audit(tool.name, summary, approval, "ok")
                 results.append({"type": "tool_result", "tool_use_id": block["id"], "content": out})
             except pc_tools.ToolError as ex:
                 await event(call=call, name=tool.name, summary=summary, state="error")
+                audit(tool.name, summary, approval, "error")
                 results.append({"type": "tool_result", "tool_use_id": block["id"], "is_error": True,
                                 "content": str(ex)})
         return results
@@ -495,23 +518,36 @@ class Assistant:
         self._snapshot_memory()  # the prefix changed anyway, so pick up memory edits now
 
     # -- daily budget, persisted so restarting the daemon doesn't reset it --------
-    def _read_usage(self) -> int:
+    def _read_usage(self) -> dict:
+        """Today's {"tokens", "usd"} (chat and computer use together)."""
         try:
             data = json.loads(self.usage_file.read_text())
-            return int(data["tokens"]) if data.get("date") == datetime.date.today().isoformat() else 0
+            if data.get("date") == datetime.date.today().isoformat():
+                return {"tokens": int(data.get("tokens", 0)), "usd": float(data.get("usd", 0.0))}
         except (OSError, ValueError, KeyError, TypeError):
-            return 0
+            pass
+        return {"tokens": 0, "usd": 0.0}
+
+    def spend(self) -> dict:
+        """What chat_done reports: today's estimated spend, and the cap if there is one."""
+        out = {"today_usd": round(self._read_usage()["usd"], 4)}
+        if self.cfg.daily_budget_usd:
+            out["budget_usd"] = self.cfg.daily_budget_usd
+        return out
 
     def _check_budget(self):
-        if self.cfg.daily_token_cap and self._read_usage() >= self.cfg.daily_token_cap:
+        used = self._read_usage()
+        if ((self.cfg.daily_token_cap and used["tokens"] >= self.cfg.daily_token_cap)
+                or (self.cfg.daily_budget_usd and used["usd"] >= self.cfg.daily_budget_usd)):
             raise ChatError("Daily AI budget reached")
 
-    def _add_usage(self, tokens: int):
-        total = self._read_usage() + tokens
+    def _add_usage(self, tokens: int, usd: float = 0.0):
+        used = self._read_usage()
         try:
             self.usage_file.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.usage_file.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"date": datetime.date.today().isoformat(), "tokens": total}))
+            tmp.write_text(json.dumps({"date": datetime.date.today().isoformat(),
+                                       "tokens": used["tokens"] + tokens, "usd": round(used["usd"] + usd, 6)}))
             tmp.replace(self.usage_file)
         except OSError as ex:
             log.warning("can't record AI usage: %s", ex)
@@ -561,11 +597,11 @@ class ChatSession:
                 lambda ev: self.send({"t": "tool", "id": tid, **ev}),
                 lambda m: self.send({"t": "chat_mood", "id": tid, "mood": m}),
                 lambda *a: self._confirm(tid, *a))
-            await self.send({"t": "chat_done", "id": tid, "usage": usage})
+            await self.send({"t": "chat_done", "id": tid, "usage": usage, **self.assistant.spend()})
         except ChatError as ex:
             await self.send({"t": "chat_error", "id": tid, "msg": str(ex)})
         except asyncio.CancelledError:
-            await self.send({"t": "chat_done", "id": tid, "cancelled": True})
+            await self.send({"t": "chat_done", "id": tid, "cancelled": True, **self.assistant.spend()})
         except Exception:
             log.exception("chat turn failed")
             await self.send({"t": "chat_error", "id": tid, "msg": "Something went wrong on the PC."})
@@ -597,7 +633,7 @@ class ChatSession:
         # (Any other ending went through _run, which catches CancelledError.)
         if task.cancelled():
             self.assistant.busy = False
-            asyncio.ensure_future(self.send({"t": "chat_done", "id": tid, "cancelled": True}))
+            asyncio.ensure_future(self.send({"t": "chat_done", "id": tid, "cancelled": True, **self.assistant.spend()}))
 
     async def cancel(self):
         if self.task and not self.task.done():

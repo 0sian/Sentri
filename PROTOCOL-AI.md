@@ -34,7 +34,7 @@ Unknown fields/messages must be ignored by both sides.
 | `chat_delta` | `id`, `text` | streamed assistant text (append) |
 | `tool` | `id`, `call`, `name`, `summary`, `state`, `detail?` | tool activity. `state`: `running` / `ok` / `error` / `denied`. `denied` carries `detail`: `user` or `timeout`. May be sent repeatedly per `call` (running, then ok/error) |
 | `confirm_req` | `id`, `call`, `name`, `summary`, `risk` (`low`/`high`), `timeout` (s) | ask the user to approve one specific action |
-| `chat_done` | `id`, `usage?` `{"in":int,"out":int}`, `cancelled?` | turn finished. Exactly one of `chat_done` / `chat_error` ends every turn |
+| `chat_done` | `id`, `usage?` `{"in":int,"out":int}`, `cancelled?`, `today_usd?`, `budget_usd?` | turn finished. Exactly one of `chat_done` / `chat_error` ends every turn |
 | `chat_error` | `id`, `msg` (short, user-readable) | turn failed (API error, budget reached, busy, ...) |
 | `cu_session` | `state`: `active` (+ `secs_left`, `goal` ≤160 chars) / `ended` (+ `reason`) | computer-use session banner. `active` is sent when a session starts (and again if its deadline changes). `ended` reasons: `done` `timeout` `user` `touched` `limit` `error` `disconnected`. Added 2026-10-22 |
 | `chat_mood` | `id`, `mood` | optional, at most once per turn, sent as early as possible (before the first `chat_delta` when the reply opens with it). One of: neutral attentive surprised excited happy laughing angry sad scared suspicious confused curious proud shy unimpressed (`thinking`/`alert`/`sleepy` are phone-driven, never sent). Unknown values are ignored by the phone. Added 2026-10-22 |
@@ -172,3 +172,15 @@ behaviour the spec leaves open. None of them adds a message or field:
      disconnect/replace (`disconnected`), an error, or phone input (`mv` with a non-zero delta,
      `sc`, `btn`, `key`, `text`: reason `touched`; the input itself still applies). Actions are
      at least 300 ms apart. Session tokens count toward the daily cap.
+13. **Round 4 (phone 0.6.0).**
+   - `open_url` gains optional `app` (a browser by name, validated like launch_app). The card and
+     the result name the browser ("Open www.atlasobscura.com in Vivaldi" / "Opened … in Vivaldi"),
+     taken from `xdg-settings get default-web-browser` when no app is given. An open window of
+     that browser is focused first.
+   - Every `chat_done` (cancelled ones too) carries `today_usd` (estimated, chat + computer use,
+     priced per model from usage) and `budget_usd` when `daily_budget_usd` is set (default 1.0).
+     The same numbers enforce the cap ("Daily AI budget reached").
+   - Audit log `~/.local/state/companion/audit.jsonl` (600, ~5 MB × 3): ts, tool, summary,
+     approval (auto/allowed/denied/timeout), result (ok/error/not run), session id for
+     computer-use actions. No outputs; typed text cut to 40 chars. `recent_actions(n)` (auto,
+     untrusted for taint) reads it back.
