@@ -1,0 +1,4 @@
+# /dev/uinput for members of the dedicated "uinput" group, so the companion daemon can create
+# its virtual mouse/keyboard from boot, before anyone logs in (uaccess only covers the
+# logged-in session). Sorts after the stock 80-uinput.rules, which sets GROUP="input".
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="uinput", MODE="0660", OPTIONS+="static_node=uinput"

@@ -14,19 +14,25 @@ python -m venv .venv
 Runtime tools: `libxkbcommon` (any Wayland desktop has it) and `wl-clipboard` for the
 paste fallback.
 
-## uinput permission
+## uinput permission and start at boot
 
-Check first: `getfacl /dev/uinput`. If your user is listed (`user:<you>:rw-`), you're
-done. The Steam and KDE Connect udev rules already tag uinput `uaccess` for the
-logged-in user. Otherwise, tag it the same way:
+The daemon starts with your user manager at boot, before anyone logs in, so the phone
+works at the login screen too. That needs a dedicated `uinput` group (the default
+`uaccess` ACL only covers a logged-in session) and lingering for your user:
 
 ```fish
-sudo cp 70-companion-uinput.rules /etc/udev/rules.d/
-sudo udevadm control --reload; and sudo udevadm trigger
+sudo groupadd --system uinput
+sudo usermod -aG uinput $USER
+sudo install -m644 90-companion-uinput.rules /etc/udev/rules.d/
+sudo install -m644 companion-uinput.conf /etc/modules-load.d/
+sudo udevadm control --reload; and sudo udevadm trigger --sysname-match=uinput
+loginctl enable-linger $USER
 ```
 
-Avoid adding yourself to the `input` group: it also gives every process you run read
-access to your physical keyboard.
+Then reboot. Don't add yourself to the `input` group: that would also give every process you
+run read access to your physical keyboard. The `uinput` group only allows creating virtual
+devices. Desktop-only tools (windows, apps, screenshots, typing tools) answer "no desktop session
+yet" until you log in; the daemon notices logins and logouts by itself.
 
 ## Run
 
@@ -49,17 +55,15 @@ them on the clipboard marked sensitive (so cliphist/Klipper skip them), sends Sh
 one format of the old clipboard is restored (e.g. plain text from a browser copy,
 not its rich-text version).
 
-## Autostart (KDE and Hyprland)
+## Autostart
 
 ```fish
-mkdir -p ~/.config/systemd/user
-ln -s ~/companion/daemon/companion.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now companion.service
+systemctl --user enable ~/companion/daemon/companion.service   # links and enables (default.target)
+systemctl --user start companion
 ```
 
-It's tied to `graphical-session.target`: it starts with either session and stops
-on logout.
+Use `enable <full path>` rather than a hand-made symlink: `systemctl reenable`/`disable`
+deletes a linked unit file, symlink included.
 
 ## Security notes
 

@@ -1,2 +1,0 @@
-# Gives the logged-in seat user access to /dev/uinput (no input-group membership needed).
-KERNEL=="uinput", TAG+="uaccess", OPTIONS+="static_node=uinput"

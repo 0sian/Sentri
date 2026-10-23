@@ -34,6 +34,7 @@ import audit
 import cu
 import keymap
 import memory
+import session
 from clipboard import ClipboardPaste
 
 log = logging.getLogger("companion")
@@ -206,7 +207,7 @@ class VirtualInput:
     def key(self, name: str, mods=()):
         code = resolve_key(name)
         if code is None:
-            log.warning("unknown key %r", name)
+            log.warning("unknown key name (%d chars)", len(str(name)))
             return
         mod_codes = [MODIFIERS[m] for m in mods if m in MODIFIERS]
         self._tap(code, mod_codes)
@@ -215,6 +216,8 @@ class VirtualInput:
         """Type s. Characters the keymap can't produce are pasted via the clipboard if a
         paster is set (each run in one go; if that would take more than MAX_PASTE_RUNS
         pastes, everything from the first one onwards in one go), otherwise skipped."""
+        # usable only while a desktop session is up to paste into (not at the login screen)
+        paster = self.paster if self.paster is not None and getattr(self.paster, "available", lambda: True)() else None
         saved = None
         # each paste costs ~the paster's settle time, so bound how many one message can do
         runs = sum(1 for k, ch in enumerate(s)
@@ -237,18 +240,18 @@ class VirtualInput:
                 j = i
                 while j < len(s) and s[j] not in self.charmap:
                     j += 1
-                if self.paster is not None and paste_whole:
+                if paster is not None and paste_whole:
                     j = len(s)
-                if self.paster is None:
-                    log.debug("no keymap for %r, skipped", s[i:j])
+                if paster is None:
+                    log.debug("%d character(s) not in the keymap, skipped", j - i)  # never log typed text
                 else:
                     if saved is None:
-                        saved = await self.paster.snapshot()
-                    await self.paster.paste(s[i:j], self._tap)
+                        saved = await paster.snapshot()
+                    await paster.paste(s[i:j], self._tap)
                 i = j
         finally:
             if saved is not None:
-                await self.paster.restore(saved)
+                await paster.restore(saved)
 
     def press_mod(self, name: str, down: bool):
         """Hold or release one modifier (for modifier-clicks); release_all() still covers it."""
@@ -469,9 +472,9 @@ class Server:
                             self.assistant.cu.stop("touched")  # Osian took over; his input still applies
                         queue.put_nowait(m)
                 except asyncio.QueueFull:
-                    log.warning("input queue full, dropping %r", raw[:80])
+                    log.warning("input queue full, dropping a %r message", m.get("t"))
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as ex:
-                    log.debug("bad message %r: %s", raw, ex)
+                    log.debug("bad message (%d bytes): %s", len(raw), type(ex).__name__)  # no payload
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -496,7 +499,7 @@ class Server:
                 async with self.input_lock:
                     await self.dispatch(m)
             except (KeyError, TypeError, ValueError) as ex:
-                log.debug("bad message %r: %s", m, ex)
+                log.debug("bad %r message: %s", m.get("t") if isinstance(m, dict) else "?", type(ex).__name__)
 
     def _clamp(self, v: float) -> float:
         return max(-self.max_step, min(self.max_step, float(v)))
@@ -515,15 +518,28 @@ class Server:
             self.vin.key(m["k"], m.get("mods", ()))
 
 
+SESSION_POLL = 3.0
+
+
+async def watch_session(vin):
+    """Follow logins and logouts: refresh the session variables, and the keymap with them
+    (the login screen uses the system layout; Hyprland uses Osian's custom one)."""
+    while True:
+        await asyncio.sleep(SESSION_POLL)
+        try:
+            if await asyncio.to_thread(session.refresh):
+                log.info("desktop session now: %s", session.describe())
+                await asyncio.to_thread(vin.refresh_keymap)
+        except Exception:
+            log.exception("session watch failed")
+
+
 async def amain(args):
     token = load_or_create_token()
-    paster = None
-    if not args.no_clipboard:
-        if ClipboardPaste.available():
-            paster = ClipboardPaste()
-        else:
-            log.warning("wl-copy/wl-paste or WAYLAND_DISPLAY missing: untypeable characters will be skipped")
-    vin = VirtualInput(args.layout, paster)
+    session.refresh()  # at boot there's no desktop yet; the watcher below picks it up later
+    log.info("desktop session: %s", session.describe())
+    # the paste fallback checks per use whether a desktop (wl-copy) is there to paste into
+    vin = VirtualInput(args.layout, None if args.no_clipboard else ClipboardPaste())
     cfg = ai.load_config()
     input_lock = asyncio.Lock()
     assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore(),
@@ -531,6 +547,7 @@ async def amain(args):
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
     srv = Server(vin, token, args.max_step, assistant, input_lock)
+    watcher = asyncio.create_task(watch_session(vin))
     mac = wol_mac()
     log.info("Wake-on-LAN %s", f"available: telling the phone {mac}" if mac else
              "not set up on the wired interface (or not wired), so the phone won't offer Wake PC")
@@ -550,6 +567,7 @@ async def amain(args):
             await stop
         log.info("shutting down")
     finally:
+        watcher.cancel()
         vin.close()
 
 
@@ -571,6 +589,8 @@ def main():
     args = p.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    # websockets' debug log prints every frame, payload included (typed text, chat). Never.
+    logging.getLogger("websockets").setLevel(logging.INFO)
     if args.rotate_token:
         print(f"New token: {write_new_token()}\nRestart the service and enter it in the phone app.")
         return

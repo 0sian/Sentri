@@ -1,11 +1,8 @@
 [Unit]
 Description=Companion phone-as-trackpad daemon
-# Started with the graphical session (uwsm for Hyprland, Plasma's systemd startup for
-# KDE both activate graphical-session.target), so WAYLAND_DISPLAY and
-# HYPRLAND_INSTANCE_SIGNATURE are in the environment for layout detection and wl-copy.
-PartOf=graphical-session.target
-After=graphical-session.target
-Requisite=graphical-session.target
+# Runs from boot (user manager with linger), before and across logins, so the phone works
+# at the login screen too. It follows desktop sessions coming and going by itself
+# (session.py); desktop-only tools say "no desktop session yet" until one is up.
 
 [Service]
 # KDE: flat pointer acceleration for our device only, so KWin doesn't stack libinput's
@@ -18,4 +15,4 @@ Restart=on-failure
 RestartSec=2
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target

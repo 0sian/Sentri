@@ -464,6 +464,7 @@ class Assistant:
             summary = tool.fallback_summary
             approval = "auto"
             try:
+                pc_tools.require_desktop(tool)
                 args = await tool.prepare(block.get("input") or {})
                 limit = pc_tools.ROUTINE_SUMMARY_LIMIT if tool.name == "run_routine" else 200
                 summary = pc_tools.clean(tool.summary(args), limit)

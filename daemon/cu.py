@@ -604,6 +604,7 @@ class StartComputerUse(pc_tools.Tool):
             raise ToolError("keep the goal under 120 characters")
         if self.controller.active:
             raise ToolError("a computer-use session is already running")
+        pc_tools.require_desktop(self)
         if not self.desktop.available():
             raise ToolError("computer use only works on Hyprland for now")
         return {"goal": goal}
