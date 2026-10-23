@@ -24,6 +24,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unicodedata
 import urllib.error
 import urllib.parse
@@ -239,6 +240,19 @@ def resolve_app(want) -> DesktopApp:
     return matches[0]
 
 
+_names = {"at": -1e9, "apps": []}
+
+
+def app_name(cls: str) -> str:
+    """A window class shown as its app's name ("vivaldi-stable" -> "Vivaldi"), using the same
+    matching as launch_app; classes with no installed app (games etc.) stay as they are."""
+    now = time.monotonic()
+    if now - _names["at"] > 60:  # re-scan the .desktop files at most once a minute
+        _names["apps"], _names["at"] = installed_apps(), now
+    c = str(cls).lower()
+    return next((a.name for a in _names["apps"] if c and c in a.window_classes()), str(cls))
+
+
 async def find_window(app: DesktopApp):
     """Id of an open window belonging to app (Hyprland or KDE), else None."""
     try:
@@ -428,7 +442,7 @@ class GetStatus(Tool):
         except ToolError:
             w = {}
         if w.get("cls"):
-            lines.append(f"Focused window: {clean(w['cls'], 60)}: {clean(w.get('title', ''), 120)}")
+            lines.append(f"Focused window: {clean(app_name(w['cls']), 60)}: {clean(w.get('title', ''), 120)}")
         return "\n".join(lines)
 
 
@@ -527,7 +541,7 @@ class ListWindows(Tool):
         lines = []
         for w in (await all_windows())[:MAX_WINDOWS]:
             mark = " (focused)" if w["active"] else ""
-            lines.append(f"id {w['id']}: {clean(w['cls'], 60)}: {clean(w['title'], 100)} "
+            lines.append(f"id {w['id']}: {clean(app_name(w['cls']), 60)}: {clean(w['title'], 100)} "
                          f"[{clean(w['where'], 30)}]{mark}")
         return "\n".join(lines) or "No windows open"
 
@@ -549,7 +563,7 @@ class FocusWindow(Tool):
         """Look the window up now, so the summary names the app that will actually be focused."""
         a = self.validate(args)
         w = await _lookup(a["window"])
-        return {**a, "app": clean(w["cls"] or "window", 40)}
+        return {**a, "app": clean(app_name(w["cls"]) or "window", 40)}
 
     def summary(self, a):
         return f"Switch to {a['app']}" if "app" in a else self.fallback_summary
@@ -572,7 +586,7 @@ async def _focused():
         w = await active_window()
     except ToolError:
         return None, None
-    return w.get("id"), clean(w.get("cls") or "the desktop", 40)
+    return w.get("id"), clean(app_name(w["cls"]) if w.get("cls") else "the desktop", 40)
 
 
 def _show_text(s: str, limit: int) -> str:
@@ -666,7 +680,7 @@ class CloseWindow(Tool):
     async def prepare(self, args):
         a = self.validate(args)
         w = await _lookup(a["window"])
-        return {**a, "app": clean(w["cls"] or "window", 40), "title": clean(w["title"], 60)}
+        return {**a, "app": clean(app_name(w["cls"]) or "window", 40), "title": clean(w["title"], 60)}
 
     def summary(self, a):
         return f"Close {a['app']}" + (f": {a['title']}" if a.get("title") else "")
@@ -1073,9 +1087,10 @@ class RunRoutine(Tool):
             call = next_call_id()
             label = f"{r.name.capitalize()} · {st.summary}"
 
-            async def event(state):
+            async def event(state, err=None):
                 if progress:
-                    await progress(call=call, name=st.tool.name, summary=clean(label, 200), state=state)
+                    await progress(call=call, name=st.tool.name, summary=clean(label, 200), state=state,
+                                   **({"err": err} if err else {}))
             try:
                 require_desktop(st.tool)
                 v = await st.tool.prepare(dict(st.raw))  # re-validated now: the PC may have changed
@@ -1085,7 +1100,7 @@ class RunRoutine(Tool):
                 text = out if isinstance(out, str) else "done"
                 lines.append(f"ok: {st.summary}: {clean(text, 300)}")
             except ToolError as ex:
-                await event("error")
+                await event("error", str(ex))
                 lines.append(f"failed: {st.summary}: {ex}")
                 failed = True
                 if st.required:
@@ -1273,7 +1288,9 @@ class RecentActions(Tool):
         if not rows:
             return "Nothing in the audit log yet"
         return "\n".join(f"{r.get('ts', '')[:16].replace('T', ' ')} {r.get('tool')}: {clean(r.get('summary', ''), 160)} "
-                         f"[{r.get('approval')}, {r.get('result')}]" + (f" ({r['session']})" if r.get("session") else "")
+                         f"[{r.get('approval')}, {r.get('result')}]"
+                         + (f": {clean(r['detail'], 120)}" if r.get("detail") else "")
+                         + (f" ({r['session']})" if r.get("session") else "")
                          for r in rows)
 
 

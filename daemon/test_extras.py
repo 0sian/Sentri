@@ -222,11 +222,25 @@ async def audit_tests():
                        ai.Reply([{"type": "text", "text": "ok"}], "end_turn", 1, 1)]
         assert a.claim()
         await a.turn("x", lambda s: asyncio.sleep(0), lambda e: asyncio.sleep(0), None, confirm)
-    got = [(r["tool"], r["summary"], r["approval"], r["result"]) for r in log2.tail(10)]
+    class Broken(A):
+        name = "broken"
+
+        async def run(self, a):
+            raise pc_tools.ToolError("keep the goal under 120 characters")
+    a.tools["broken"] = Broken()
+    be.scripts += [ai.Reply([{"type": "tool_use", "id": "t", "name": "broken", "input": {"n": 4}}], "tool_use", 1, 1),
+                   ai.Reply([{"type": "text", "text": "ok"}], "end_turn", 1, 1)]
+    assert a.claim()
+    await a.turn("x", lambda s: asyncio.sleep(0), lambda e: asyncio.sleep(0), None, confirm)
+    last = log2.tail(1)[0]
+    check("failed calls record why (detail), and recent_actions shows it",
+          last["result"] == "error" and last["detail"] == "keep the goal under 120 characters"
+          and "keep the goal under 120 characters" in await a.tools["recent_actions"].run({"n": 1}), last)
+    got = [(r["tool"], r["summary"], r["approval"], r["result"]) for r in log2.tail(10)][:3]
     check("assistant audits auto / allowed / denied calls",
           got == [("auto_thing", "Auto 1", "auto", "ok"), ("gated", "Gated 2", "allowed", "ok"),
                   ("gated", "Gated 3", "denied", "not run")], got)
-    out = await a.tools["recent_actions"].run(a.tools["recent_actions"].validate({"n": 2}))
+    out = await a.tools["recent_actions"].run(a.tools["recent_actions"].validate({"n": 3}))
     check("recent_actions reads the log back", "Gated 2 [allowed, ok]" in out and "Gated 3 [denied, not run]" in out
           and "Auto 1" not in out, out)
 

@@ -44,6 +44,8 @@ async def fake_eval(body):
 
 
 kwin.evaluate = fake_eval
+t._names.update(at=float("inf"), apps=[t.DesktopApp("vivaldi-stable.desktop", "Vivaldi", "", "vivaldi-stable"),
+                                       t.DesktopApp("steam.desktop", "Steam")])
 kwin.available = lambda: True
 t._hyprland = lambda: False
 
@@ -53,13 +55,13 @@ async def window_tests():
     check("KDE window list from KWin; malformed ids dropped", [w["id"] for w in wins] == [WIN_A, WIN_B], wins)
     out = await t.ListWindows().run({})
     check("list_windows shows KWin ids, class, title, desktop, focus",
-          f"id {WIN_A}: vivaldi-stable: YouTube - Vivaldi [Desktop 1] (focused)" in out, out)
+          f"id {WIN_A}: Vivaldi: YouTube - Vivaldi [Desktop 1] (focused)" in out, out)
     fw = t.FocusWindow()
     a = await fw.prepare({"window": WIN_B})
     bodies.clear()
     await fw.run(a)
     check("focus_window on KDE: summary names the app, KWin script carries only the validated id",
-          fw.summary(a) == "Switch to steam" and WIN_B in bodies[-1] and "workspace.activeWindow = w" in bodies[-1])
+          fw.summary(a) == "Switch to Steam" and WIN_B in bodies[-1] and "workspace.activeWindow = w" in bodies[-1])
     bad = ["{x'); workspace.windowList().forEach(w => w.closeWindow()); ('}", "0x1; rm -rf", "steam", ""]
     rejected = 0
     for b in bad:
@@ -81,7 +83,7 @@ async def window_tests():
     a = await cw.prepare({"window": WIN_B})
     bodies.clear()
     out = await cw.run(a)
-    check("close_window on KDE", cw.summary(a) == "Close steam: Steam" and "closeWindow" in bodies[-1] and out == "Closed steam")
+    check("close_window on KDE", cw.summary(a) == "Close Steam: Steam" and "closeWindow" in bodies[-1] and out == "Closed Steam")
 
     la = t.LaunchApp()
     t.installed_apps = lambda: [t.DesktopApp("vivaldi-stable.desktop", "Vivaldi", "Web Browser", "vivaldi-stable"),
@@ -93,7 +95,7 @@ async def window_tests():
           and "already open" in out and WIN_A in bodies[-1], (la.summary(a), out))
     a = await la.prepare({"app": "firefox"})
     check("not open on KDE -> launch", a["existing"] is None and la.summary(a) == "Open Firefox")
-    check("type_text focus guard sees the KDE focused window", await t._focused() == (WIN_A, "vivaldi-stable"))
+    check("type_text focus guard sees the KDE focused window", await t._focused() == (WIN_A, "Vivaldi"))
 
 
 async def geometry_tests():

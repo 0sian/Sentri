@@ -34,8 +34,9 @@ class AuditLog:
     def __init__(self, path: Path = AUDIT_FILE):
         self.path = path
 
-    def record(self, tool: str, summary: str, approval: str, result: str, session: str = None):
-        """approval: auto / allowed / denied / timeout. result: ok / error / not run."""
+    def record(self, tool: str, summary: str, approval: str, result: str, session: str = None, detail: str = None):
+        """approval: auto / allowed / denied / timeout. result: ok / error / not run.
+        detail: why it failed (our own error message), for result=error."""
         summary = re.sub(r"[\x00-\x1f\x7f]", " ", str(summary))[:200]
         if tool in TYPING_TOOLS:
             summary = _cut_typed(summary)
@@ -43,6 +44,8 @@ class AuditLog:
                  "summary": summary, "approval": approval, "result": result}
         if session:
             entry["session"] = session
+        if detail:
+            entry["detail"] = re.sub(r"[\x00-\x1f\x7f]", " ", str(detail))[:120]
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if self.path.exists() and self.path.stat().st_size > MAX_BYTES:

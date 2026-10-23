@@ -444,7 +444,7 @@ class Session:
                 await self.events(call, name, summary, "ok")
                 results.append({**base, "content": content})
             except ToolError as ex:
-                await self.events(call, name, summary, "error")
+                await self.events(call, name, summary, "error", None, str(ex))
                 results.append({**base, "is_error": True, "content": str(ex)})
                 failed = True
         return results
@@ -708,12 +708,12 @@ class StartComputerUse(pc_tools.Tool):
 
         sid = f"cu-{datetime.datetime.now():%Y%m%d-%H%M%S}"
 
-        async def events(call, name, summary, state, detail=None):
+        async def events(call, name, summary, state, detail=None, err=None):
             if progress:
                 kw = {"call": call, "name": name, "summary": summary, "state": state}
                 if detail:
                     kw["detail"] = detail
-                await progress(session=sid, **kw)
+                await progress(session=sid, err=err, **kw)
 
         s = Session(self.cfg, self.backend, self.desktop, a["goal"], events, self.check_daily, self.add_daily,
                     self.open_url, self.on_confirm)

@@ -448,9 +448,9 @@ class Assistant:
             if on_tool:
                 await on_tool(kw)
 
-        def audit(tool_name, summary, approval, result, session=None):
+        def audit(tool_name, summary, approval, result, session=None, detail=None):
             if self.audit:
-                self.audit.record(tool_name, summary, approval, result, session)
+                self.audit.record(tool_name, summary, approval, result, session, detail)
 
         results = []
         for block in calls:
@@ -483,10 +483,10 @@ class Assistant:
                     self.tainted = True
                 if getattr(tool, "wants_progress", False):
                     # routine steps and computer-use actions: audited under the card that covered them
-                    async def progress(session=None, _approval=approval, **kw):
-                        await event(**kw)
+                    async def progress(session=None, err=None, _approval=approval, **kw):
+                        await event(**kw)  # err/session are for the audit log, not the phone
                         if kw["state"] in ("ok", "error"):
-                            audit(kw["name"], kw["summary"], _approval, kw["state"], session)
+                            audit(kw["name"], kw["summary"], _approval, kw["state"], session, err)
                         elif kw["state"] == "denied":
                             audit(kw["name"], kw["summary"], "timeout" if kw.get("detail") == "timeout" else "denied",
                                   "not run", session)
@@ -498,7 +498,7 @@ class Assistant:
                 results.append({"type": "tool_result", "tool_use_id": block["id"], "content": out})
             except pc_tools.ToolError as ex:
                 await event(call=call, name=tool.name, summary=summary, state="error")
-                audit(tool.name, summary, approval, "error")
+                audit(tool.name, summary, approval, "error", detail=str(ex))
                 results.append({"type": "tool_result", "tool_use_id": block["id"], "is_error": True,
                                 "content": str(ex)})
         return results

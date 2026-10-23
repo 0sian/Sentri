@@ -53,6 +53,9 @@ async def main():
                     "hyprctl dispatch hl.dsp": "ok"})
     t.run = rec
     os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = "test"
+    # window classes shown as app names: a fixed app list, not whatever this machine has installed
+    t._names.update(at=float("inf"), apps=[t.DesktopApp("firefox.desktop", "Firefox"), t.DesktopApp("foot.desktop", "Foot")])
+    check("unknown window classes (games etc.) keep their class", t.app_name("steam_app_123") == "steam_app_123")
 
     # --- clean ---
     s = t.clean("a\x1b[2J‮b\nc\tz" + "y" * 300, 50)
@@ -89,7 +92,7 @@ async def main():
           rejects(f, {"window": "0xabc'}) os.execute('x"}) and rejects(f, {"window": "firefox"})
           and rejects(f, {"window": 123}))
     a = await f.prepare({"window": "0xabc"})
-    check("focus_window summary names the real app", f.summary(a) == "Switch to firefox", f.summary(a))
+    check("focus_window summary names the real app", f.summary(a) == "Switch to Firefox", f.summary(a))
     rec.argv.clear()
     await f.run(a)
     check("focus_window uses the Lua dispatcher", rec.argv[0] == ["hyprctl", "dispatch", "hl.dsp.focus({window='address:0xabc'})"],
@@ -197,7 +200,7 @@ async def confirm_tier_tests():
           rejects(tt, {"text": ""}) and rejects(tt, {"text": "x" * 301}) and rejects(tt, {"text": "a\x1b[2Jb"}))
     a = await tt.prepare({"text": "ls -la\nrm x"})
     check("type_text summary shows Enter presses and the focused app",
-          tt.summary(a) == 'Type "ls -la ⏎ rm x" into foot', tt.summary(a))
+          tt.summary(a) == 'Type "ls -la ⏎ rm x" into Foot', tt.summary(a))
     focused["address"] = "0xbbb"  # focus moved between the card and the approval
     try:
         await tt.run(a)
@@ -216,7 +219,7 @@ async def confirm_tier_tests():
           rejects(pk, {"key": "launch_missiles"}) and rejects(pk, {"key": "t", "mods": ["hyper"]})
           and rejects(pk, {"key": "t", "mods": ["ctrl", "ctrl"]}) and rejects(pk, {"key": "t", "mods": "ctrl"}))
     a = await pk.prepare({"key": "T", "mods": ["shift", "ctrl"]})
-    check("press_keys summary is canonical and names the app", pk.summary(a) == "Press Ctrl+Shift+T in foot", pk.summary(a))
+    check("press_keys summary is canonical and names the app", pk.summary(a) == "Press Ctrl+Shift+T in Foot", pk.summary(a))
     await pk.run(a)
     check("press_keys sends through the injector", inj.pressed == [("t", ["ctrl", "shift"])], inj.pressed)
 
@@ -224,7 +227,7 @@ async def confirm_tier_tests():
     cw = t.CloseWindow()
     check("close_window only takes a hex id", rejects(cw, {"window": "firefox"}))
     a = await cw.prepare({"window": "0xabc"})
-    check("close_window summary: app + cleaned title", cw.summary(a) == "Close firefox: Inbox [2J (3)", cw.summary(a))
+    check("close_window summary: app + cleaned title", cw.summary(a) == "Close Firefox: Inbox [2J (3)", cw.summary(a))
     rec.argv.clear()
     await cw.run(a)
     check("close_window uses the Lua close dispatcher on that address",

@@ -335,6 +335,10 @@ async def limit_tests():
     rows = a.audit.tail(10)
     check("session + chat costs in today's dollars (2 Sonnet calls $0.006 + 2 Haiku calls $0.0003)",
           a.spend()["today_usd"] == 0.0063, a.spend())
+    a.audit.record("x", "y", "auto", "error", detail="bad\x1b[2Jthing " + "z" * 300)
+    rec = a.audit.tail(1)[0]
+    check("audit detail is cleaned and capped", "\x1b" not in rec["detail"] and len(rec["detail"]) == 120, rec)
+    rows = rows[:2]
     check("audit: session actions carry the session id; the start call is 'allowed'",
           [(r["tool"], r["approval"], r["result"], bool(r.get("session"))) for r in rows] ==
           [("left_click", "allowed", "ok", True), ("start_computer_use", "allowed", "ok", False)], rows)
