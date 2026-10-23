@@ -151,6 +151,7 @@ class HyprDesktop:
     async def screenshot(self, zoom_region=None, geom: Geometry = None):
         """(jpeg bytes, Geometry). With zoom_region (screenshot px x0,y0,x1,y1 of geom), a
         close-up of that region at up to SHOT_EDGE px, for reading small text."""
+        pc_tools.desktop_env()  # at the login screen: "no desktop session yet", before anything else
         if zoom_region is None:
             mon = next((m for m in await self._json("monitors") if m.get("focused")), None)
             if mon is None:
@@ -158,14 +159,14 @@ class HyprDesktop:
             geom = Geometry(mon["x"], mon["y"], float(mon.get("scale") or 1.0), mon["width"], mon["height"],
                             shot_scale_for(mon["width"], mon["height"]))
             data = await pc_tools.run_bytes("grim", "-c", "-o", mon["name"], "-t", "jpeg", "-q", "80",
-                                            "-s", f"{geom.shot_scale:.4f}", "-")
+                                            "-s", f"{geom.shot_scale:.4f}", "-", env=pc_tools.desktop_env())
             return data, geom
         x0, y0 = geom.to_layout(*zoom_region[:2])
         x1, y1 = geom.to_layout(*zoom_region[2:])
         w, h = max(1, round(x1 - x0)), max(1, round(y1 - y0))
         s = min(4.0, SHOT_EDGE / max(w, h))  # magnify small regions, cap the output size
         data = await pc_tools.run_bytes("grim", "-c", "-g", f"{round(x0)},{round(y0)} {w}x{h}", "-t", "jpeg",
-                                        "-q", "85", "-s", f"{s:.3f}", "-")
+                                        "-q", "85", "-s", f"{s:.3f}", "-", env=pc_tools.desktop_env())
         return data, geom
 
     async def cursor(self):
@@ -193,7 +194,8 @@ class HyprDesktop:
             return None
         for drawer, label in (("session", "power menu"), ("launcher", "launcher")):
             try:
-                out = await pc_tools.run("qs", "-c", "caelestia", "ipc", "call", "drawers", "isOpen", drawer)
+                out = await pc_tools.run("qs", "-c", "caelestia", "ipc", "call", "drawers", "isOpen", drawer,
+                                         env=pc_tools.desktop_env())
             except ToolError:
                 continue
             if out.strip() not in ("", "0", "false"):

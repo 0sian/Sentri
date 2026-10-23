@@ -24,8 +24,9 @@ class Recorder:
         self.argv = []
         self.answers = answers or {}
 
-    async def __call__(self, *argv):
+    async def __call__(self, *argv, env=None):
         self.argv.append(list(argv))
+        self.env = env
         for prefix, out in self.answers.items():
             if " ".join(argv).startswith(prefix):
                 if isinstance(out, Exception):
@@ -176,10 +177,10 @@ async def confirm_tier_tests():
     rec = Recorder({"hyprctl clients": '[{"address":"0xabc","class":"firefox","title":"Inbox \\u001b[2J (3)"}]',
                     "hyprctl dispatch hl.dsp.window.close": "ok"})
 
-    async def fake_run(*argv):
+    async def fake_run(*argv, env=None):
         if argv[:2] == ("hyprctl", "activewindow"):
             return __import__("json").dumps(focused)
-        return await rec(*argv)
+        return await rec(*argv, env=env)
     t.run = fake_run
     inj = FakeInjector()
 

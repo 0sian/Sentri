@@ -54,15 +54,15 @@ for k in session.SESSION_VARS:
 def session_tests():
     env = {"WAYLAND_DISPLAY": "wayland-1", "HYPRLAND_INSTANCE_SIGNATURE": "abc", "XDG_CURRENT_DESKTOP": "Hyprland"}
     check("at the login screen: nothing set, desktop not ready",
-          not session.refresh(lambda: env) and not session.desktop_ready() and session.describe() == "none (login screen)")
+          not session.refresh(lambda: env, lambda: {}) and not session.desktop_ready() and session.describe() == "none (login screen)")
     (TMP / "wayland-1").touch()
     (TMP / "hypr" / "abc").mkdir(parents=True)
-    check("after login: variables picked up from the user manager", session.refresh(lambda: env)
+    check("after login: variables picked up from the user manager", session.refresh(lambda: env, lambda: {})
           and session.desktop_ready() and os.environ["HYPRLAND_INSTANCE_SIGNATURE"] == "abc"
           and session.describe() == "Hyprland")
-    check("no change -> refresh reports nothing", not session.refresh(lambda: env))
+    check("no change -> refresh reports nothing", not session.refresh(lambda: env, lambda: {}))
     (TMP / "wayland-1").unlink()
-    changed = session.refresh(lambda: env)
+    changed = session.refresh(lambda: env, lambda: {})
     check("after logout: stale variables dropped even though the manager still lists them",
           changed and not session.desktop_ready() and "WAYLAND_DISPLAY" not in os.environ
           and "HYPRLAND_INSTANCE_SIGNATURE" not in os.environ)
@@ -190,8 +190,75 @@ async def input_and_logging_tests():
     check("control: unpinned websockets debug logging would have leaked it", any(SECRET in m for m in records))
 
 
+async def launch_env_tests():
+    session.X11_DIR = TMP / "x11"
+    session.X11_DIR.mkdir()
+    (TMP / "wayland-1").touch()
+    (session.X11_DIR / "X0").touch()
+    cookie = TMP / "xauth_AbCd12"
+    cookie.write_text("cookie")
+    manager = {"WAYLAND_DISPLAY": "wayland-1", "DISPLAY": ":0", "XDG_CURRENT_DESKTOP": "KDE"}  # no XAUTHORITY
+    proc = {"WAYLAND_DISPLAY": "wayland-1", "DISPLAY": ":0", "XAUTHORITY": str(cookie), "XDG_CURRENT_DESKTOP": "KDE"}
+    env = session.launch_env(lambda: manager, lambda: proc)
+    check("launch env: XAUTHORITY filled in from a desktop process when the manager lacks it",
+          env and env["XAUTHORITY"] == str(cookie) and env["DISPLAY"] == ":0" and env["XDG_RUNTIME_DIR"] == str(TMP)
+          and env["XDG_CURRENT_DESKTOP"] == "KDE", {k: env.get(k) for k in ("XAUTHORITY", "DISPLAY")} if env else env)
+    new_cookie = TMP / "xauth_Zz99"
+    new_cookie.write_text("cookie")
+    cookie.unlink()
+    env = session.launch_env(lambda: {**manager, "XAUTHORITY": str(new_cookie)}, lambda: proc)
+    check("re-read per launch: the new login's cookie is used, the old one dropped", env["XAUTHORITY"] == str(new_cookie))
+    env = session.launch_env(lambda: {**manager, "XAUTHORITY": str(cookie)}, lambda: {})
+    check("stale cookie path is not passed on", env is not None and "XAUTHORITY" not in env)
+    (session.X11_DIR / "X0").unlink()
+    env = session.launch_env(lambda: {"DISPLAY": ":0"}, lambda: {})
+    check("DISPLAY without its X socket -> no session", env is None)
+    (TMP / "wayland-1").unlink()
+    check("login screen -> no launch environment", session.launch_env(lambda: manager, lambda: proc) is None)
+
+    # the tools pass it through, and refuse cleanly at the login screen without spawning anything
+    calls = []
+
+    async def rec(*argv, env=None):
+        calls.append((argv, env))
+        if argv[:2] == ("xdg-settings", "get"):
+            return "firefox.desktop\n"
+        return ""
+    real_run, real_launch = pc_tools.run, session.launch_env
+    pc_tools.run = rec
+    app = pc_tools.DesktopApp("steam.desktop", "Steam")
+    session.launch_env = lambda: {"DISPLAY": ":0", "XAUTHORITY": "/run/user/1000/xauth_x", "PATH": "/usr/bin"}
+    await pc_tools.LaunchApp().run({"app": app, "new_window": False, "existing": None})
+    check("launch_app hands the session env (DISPLAY + XAUTHORITY) to the launch",
+          calls[-1][0][0] == "systemd-run" and calls[-1][1]["XAUTHORITY"] == "/run/user/1000/xauth_x", calls[-1])
+    ou = pc_tools.OpenUrl()
+    a = ou.validate({"url": "https://example.com/"})
+    a["browser"], a["existing"] = None, None
+    await ou.run(a)
+    check("open_url too", calls[-1][1]["DISPLAY"] == ":0")
+    session.launch_env = lambda: None
+    calls.clear()
+    errs = []
+    for coro in (pc_tools.LaunchApp().run({"app": app, "new_window": False, "existing": None}), ou.run(a)):
+        try:
+            await coro
+        except pc_tools.ToolError as ex:
+            errs.append(str(ex))
+    check("login screen: launch_app/open_url refuse with 'no desktop session yet', nothing spawned",
+          errs == [session.NO_DESKTOP] * 2 and not calls, (errs, calls))
+    import cu
+    try:
+        await cu.HyprDesktop(None, None).screenshot()
+        shot = ""
+    except pc_tools.ToolError as ex:
+        shot = str(ex)
+    check("computer use screenshot refuses the same way, before touching anything", shot == session.NO_DESKTOP, shot)
+    pc_tools.run, session.launch_env = real_run, real_launch
+
+
 async def main():
     session_tests()
+    await launch_env_tests()
     await gating_tests()
     await input_and_logging_tests()
     print()

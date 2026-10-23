@@ -56,11 +56,11 @@ def clean(s, limit: int) -> str:
     return s if len(s) <= limit else s[:limit - 1] + "…"
 
 
-async def run(*argv: str) -> str:
+async def run(*argv: str, env: dict = None) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     except FileNotFoundError:
         raise ToolError(f"{argv[0]} isn't installed")
     try:
@@ -77,13 +77,13 @@ async def run(*argv: str) -> str:
     return out.decode(errors="replace")
 
 
-async def run_bytes(*argv: str, timeout: float = TIMEOUT, merge_stderr: bool = False) -> bytes:
+async def run_bytes(*argv: str, timeout: float = TIMEOUT, merge_stderr: bool = False, env: dict = None) -> bytes:
     """Like run(), but returns raw stdout (and stderr if merge_stderr), and a non-zero exit
     is only an error when there's no output (commands like checkupdates exit 2 for "none")."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.DEVNULL)
+            stderr=asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.DEVNULL, env=env)
     except FileNotFoundError:
         raise ToolError(f"{argv[0]} isn't installed")
     try:
@@ -295,7 +295,8 @@ class LaunchApp(Tool):
                 pass  # the window closed in the meantime: launch it after all
         # A transient scope keeps the app out of the daemon's cgroup, so restarting the
         # daemon doesn't kill what it opened. gtk-launch exits once the app is started.
-        await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", "gtk-launch", app.id)
+        await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", "gtk-launch", app.id,
+                  env=desktop_env())
         return f"Opened {clean(app.name, 60)}"
 
 
@@ -685,7 +686,7 @@ class OpenUrl(Tool):
                 pass
         # Own systemd scope, as with launch_app; the URL is one argv item (already checked http/https)
         launcher = ["gtk-launch", browser.id, a["url"]] if browser else ["xdg-open", a["url"]]
-        await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", *launcher)
+        await run("systemd-run", "--user", "--scope", "--collect", "--quiet", "--", *launcher, env=desktop_env())
         return f"Opened {a['host']} in {clean(browser.name, 40) if browser else 'the default browser'}"
 
 
@@ -707,7 +708,8 @@ class Screenshot(Tool):
         if not mon:
             raise ToolError("couldn't find the focused monitor")
         scale = min(1.0, self.MAX_EDGE / max(mon["width"], mon["height"]))
-        jpeg = await run_bytes("grim", "-o", mon["name"], "-t", "jpeg", "-q", "75", "-s", f"{scale:.3f}", "-")
+        jpeg = await run_bytes("grim", "-o", mon["name"], "-t", "jpeg", "-q", "75", "-s", f"{scale:.3f}", "-",
+                               env=desktop_env())
         return [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                              "data": base64.b64encode(jpeg).decode()}},
                 {"type": "text", "text": f"Screenshot of monitor {clean(mon['name'], 20)}. "
@@ -1186,6 +1188,15 @@ class RecentActions(Tool):
         return "\n".join(f"{r.get('ts', '')[:16].replace('T', ' ')} {r.get('tool')}: {clean(r.get('summary', ''), 160)} "
                          f"[{r.get('approval')}, {r.get('result')}]" + (f" ({r['session']})" if r.get("session") else "")
                          for r in rows)
+
+
+def desktop_env() -> dict:
+    """Environment for a child that needs the desktop (an app, a browser, grim), read fresh
+    on every call because XAUTHORITY changes per login. At the login screen: a clean error."""
+    env = session.launch_env()
+    if env is None:
+        raise ToolError(session.NO_DESKTOP)
+    return env
 
 
 def require_desktop(tool: "Tool"):
