@@ -258,6 +258,41 @@ async def confirm_tier_tests():
           and out[0]["type"] == "image" and out[0]["source"]["media_type"] == "image/jpeg", (calls, out[0]["type"]))
     check("screenshot is high risk", t.Screenshot.risk == "high" and t.Screenshot().needs_confirm({}))
 
+    # KDE: Spectacle in background mode, file waited for, downscaled, temp dir removed
+    real_env, real_hypr, real_which = t.desktop_env, t._hyprland, t.shutil.which
+    tmpdir = Path(tempfile.mkdtemp())
+    t.desktop_env = lambda: {"XDG_CURRENT_DESKTOP": "KDE", "XDG_RUNTIME_DIR": str(tmpdir), "WAYLAND_DISPLAY": "w"}
+    t._hyprland = lambda: False
+    t.shutil.which = lambda name: f"/usr/bin/{name}"
+    kcalls = []
+
+    async def kde_bytes(*argv, **kw):
+        kcalls.append(list(argv))
+        if argv[0] == "spectacle":
+            out = Path(argv[argv.index("-o") + 1])
+            async def late():  # spectacle may return before the file is written
+                await asyncio.sleep(0.2)
+                out.write_bytes(b"PNGDATA")
+            asyncio.ensure_future(late())
+        elif argv[0] == "magick":
+            Path(argv[-1]).write_bytes(b"\xff\xd8small")
+        return b""
+    t.run_bytes = kde_bytes
+    out = await t.Screenshot().run({})
+    check("KDE screenshot: spectacle -b -n -m into a private temp dir, waits for the file, magick shrinks it",
+          kcalls[0][:5] == ["spectacle", "-b", "-n", "-m", "-o"] and kcalls[1][0] == "magick"
+          and "1568x1568>" in kcalls[1] and out[0]["source"]["media_type"] == "image/jpeg"
+          and not list(tmpdir.iterdir()), (kcalls, list(tmpdir.iterdir())))
+    t.desktop_env = lambda: {"XDG_CURRENT_DESKTOP": "GNOME"}
+    try:
+        await t.Screenshot().run({})
+        msg = ""
+    except t.ToolError as ex:
+        msg = str(ex)
+    check("other desktops: a clear 'screenshots aren't supported' error", msg == "screenshots aren't supported on this desktop yet", msg)
+    t.desktop_env, t._hyprland, t.shutil.which = real_env, real_hypr, real_which
+    t.run_bytes = fake_bytes
+
     # --- read_clipboard ---
     rc = t.ReadClipboard()
     rec.answers = {"wl-paste --list-types": "text/plain;charset=utf-8\nx-kde-passwordManagerHint\n"}
