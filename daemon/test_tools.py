@@ -392,7 +392,8 @@ async def confirm_tier_tests():
     check("risk tiers match the spec", risks == {
         "launch_app": None, "set_volume": None, "media_control": None, "get_status": None, "list_windows": None,
         "focus_window": None, "type_text": "low", "press_keys": "low", "close_window": "low", "open_url": "low",
-        "screenshot": "high", "read_clipboard": "high", "run_named_command": "high"}, risks)
+        "screenshot": "high", "read_clipboard": "high", "run_named_command": "high",
+        "list_processes": None, "list_startup": None, "kill_process": "high"}, risks)
     check("every definition strict", all(x.definition()["strict"] for x in reg.values()))
 
 

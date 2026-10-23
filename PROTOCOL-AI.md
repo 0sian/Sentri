@@ -184,3 +184,19 @@ behaviour the spec leaves open. None of them adds a message or field:
      approval (auto/allowed/denied/timeout), result (ok/error/not run), session id for
      computer-use actions. No outputs; typed text cut to 40 chars. `recent_actions(n)` (auto,
      untrusted for taint) reads it back.
+14. **Process tools** (`daemon/procs.py`).
+   - `list_processes(sort, limit≤25)` and `list_startup()` are read-only and auto tier. They show
+     names only (never command lines), and count as untrusted for taint, because programs choose
+     their own names.
+   - `kill_process(pid, force=false)` is high risk, with a card every time. It takes a PID only,
+     never a name. The card is built from /proc: "End firefox (PID 1234, user, 512 MB) with
+     SIGTERM", or "Force-kill … with SIGKILL".
+   - It refuses: PID 1, the daemon itself and its service manager, other users' processes, and
+     session/compositor processes (kwin_wayland, plasmashell, ksmserver, Hyprland, uwsm, sddm,
+     systemd, Xwayland, dbus, ...).
+   - Just before signalling it re-checks that the PID still has the name and start time shown on
+     the card.
+   - It reports honestly: exited, or "still running 3 s after SIGTERM … forcing needs force=true
+     and another approval" as an error.
+   - Audited like every tool, with signal and result.
+   - No stop/disable-service tool.

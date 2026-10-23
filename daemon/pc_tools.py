@@ -1312,7 +1312,9 @@ def registry(injector=None, allow_hosts=(), commands=(), routines=None, store=No
              homelab: Glances = None) -> dict:
     """All tools for this daemon. Keyboard tools need an injector (the daemon's virtual input);
     run_named_command / routines / memory tools only exist when configured."""
-    tools = list(AUTO_TOOLS) + [CloseWindow(), OpenUrl(allow_hosts), Screenshot(), ReadClipboard()]
+    import procs
+    tools = list(AUTO_TOOLS) + [procs.ListProcesses(), procs.ListStartup(),
+                                CloseWindow(), OpenUrl(allow_hosts), Screenshot(), ReadClipboard(), procs.KillProcess()]
     if injector is not None:
         tools[6:6] = [TypeText(injector), PressKeys(injector)]
     if commands:

@@ -74,7 +74,8 @@ async def gating_tests():
     reg = pc_tools.registry(injector=object(), commands=[pc_tools.NamedCommand("x", "x", ["true"])])
     login_screen_ok = sorted(n for n, t in reg.items() if not t.needs_desktop)
     check("tools that work at the login screen", login_screen_ok ==
-          ["get_status", "media_control", "run_named_command", "set_volume"], login_screen_ok)
+          ["get_status", "kill_process", "list_processes", "list_startup", "media_control", "run_named_command",
+           "set_volume"], login_screen_ok)
 
     class Needs(pc_tools.Tool):
         name = "launch_app"
