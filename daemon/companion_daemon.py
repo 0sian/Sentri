@@ -543,7 +543,7 @@ async def amain(args):
     cfg = ai.load_config()
     input_lock = asyncio.Lock()
     assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore(),
-                             desktop=cu.HyprDesktop(vin, input_lock), audit=audit.AuditLog()) if cfg else None
+                             desktop=cu.AutoDesktop(vin, input_lock), audit=audit.AuditLog()) if cfg else None
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
     srv = Server(vin, token, args.max_step, assistant, input_lock)

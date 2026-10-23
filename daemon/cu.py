@@ -19,8 +19,10 @@ import logging
 import math
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 import pc_tools
 from pc_tools import ToolError, clean
@@ -237,6 +239,91 @@ class HyprDesktop:
     async def type(self, text):
         async with self.lock:
             await self.vin.text(text)
+
+
+class KDEDesktop(HyprDesktop):
+    """Plasma: Spectacle for screenshots, KWin scripting (kwin.py) for the pointer position,
+    the focused window and the monitor layout; clicks and keys through the same uinput device."""
+
+    # Plasma surfaces where typed text can launch or run things, by focused window class
+    LAUNCHERS = {"plasmashell": "launcher", "org.kde.krunner": "launcher", "krunner": "launcher"}
+    POWER = {"ksmserver-logout-greeter", "org.kde.ksmserver-logout-greeter"}
+
+    def available(self) -> bool:
+        import kwin
+        return kwin.available() and all(shutil.which(t) for t in ("spectacle", "magick", "kscreen-doctor"))
+
+    async def cursor(self):
+        import kwin
+        return await kwin.cursor()
+
+    async def focused_class(self) -> str:
+        import kwin
+        return await kwin.active_class()
+
+    async def overlay_open(self):
+        cls = await self.focused_class()
+        if cls in self.POWER:
+            return "power menu"
+        return self.LAUNCHERS.get(cls)
+
+    async def screenshot(self, zoom_region=None, geom: Geometry = None):
+        import kwin
+        env = pc_tools.desktop_env()
+        tmp = Path(tempfile.mkdtemp(prefix="companion-cu-", dir=env.get("XDG_RUNTIME_DIR")))
+        try:
+            png = await pc_tools.spectacle_capture(env, tmp, pointer=True)
+            iw, ih = (int(v) for v in (await pc_tools.run("magick", "identify", "-format", "%w %h",
+                                                           str(png), env=env)).split())
+            out = tmp / "out.jpg"
+            if zoom_region is None:
+                # Spectacle -m captures the monitor under the pointer; take its layout geometry
+                # from kscreen-doctor and the pixel size from the image itself, so fractional
+                # scaling (image px vs layout px) maps exactly whichever way Spectacle renders it.
+                cx, cy = await kwin.cursor()
+                mons = await kwin.monitors()
+                mon = next((m for m in mons if m["x"] <= cx < m["x"] + m["w"] and m["y"] <= cy < m["y"] + m["h"]),
+                           mons[0] if len(mons) == 1 else None)
+                if mon is None or abs(iw / ih - mon["w"] / mon["h"]) > 0.02:
+                    raise ToolError("couldn't tell which monitor the screenshot shows")
+                geom = Geometry(mon["x"], mon["y"], iw / mon["w"], iw, ih, shot_scale_for(iw, ih))
+                sw, sh = geom.shot_size
+                await pc_tools.run_bytes("magick", str(png), "-resize", f"{sw}x{sh}!", "-quality", "80", str(out), env=env)
+                return out.read_bytes(), geom
+            # zoom: crop the region (screenshot px -> image px) from a fresh capture, magnify
+            x0, y0, x1, y1 = (v / geom.shot_scale for v in zoom_region)
+            w, h = max(1, round(x1 - x0)), max(1, round(y1 - y0))
+            s = min(4.0, SHOT_EDGE / max(w, h))
+            await pc_tools.run_bytes("magick", str(png), "-crop", f"{w}x{h}+{round(x0)}+{round(y0)}", "+repage",
+                                     "-resize", f"{round(w * s)}x{round(h * s)}!", "-quality", "85", str(out), env=env)
+            return out.read_bytes(), geom
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class AutoDesktop:
+    """Picks the driver for whichever desktop session is running when it's used."""
+
+    def __init__(self, vin, lock):
+        self.drivers = {"hyprland": HyprDesktop(vin, lock), "kde": KDEDesktop(vin, lock)}
+
+    def _driver(self):
+        if pc_tools._hyprland():
+            return self.drivers["hyprland"]
+        import kwin
+        if kwin.available():
+            return self.drivers["kde"]
+        return None
+
+    def available(self) -> bool:
+        d = self._driver()
+        return d is not None and d.available()
+
+    def __getattr__(self, name):
+        d = self._driver()
+        if d is None:
+            raise ToolError("computer use isn't supported on this desktop yet")
+        return getattr(d, name)
 
 
 # --------------------------------------------------------------------------------
@@ -608,7 +695,7 @@ class StartComputerUse(pc_tools.Tool):
             raise ToolError("a computer-use session is already running")
         pc_tools.require_desktop(self)
         if not self.desktop.available():
-            raise ToolError("computer use only works on Hyprland for now")
+            raise ToolError("computer use isn't supported on this desktop yet")
         return {"goal": goal}
 
     def summary(self, a):

@@ -49,6 +49,7 @@ async def main():
                     "playerctl -p spotify status": "Paused\n",
                     "playerctl -p feishin status": "Playing\n",
                     "hyprctl clients": '[{"address":"0xabc","class":"firefox","title":"t","workspace":{"name":"1"}}]',
+                    "hyprctl activewindow": '{"address":"0xabc","class":"firefox","title":"t"}',
                     "hyprctl dispatch hl.dsp": "ok"})
     t.run = rec
     os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = "test"
@@ -100,12 +101,18 @@ async def main():
         gone = True
     check("focus_window: unknown window -> error before anything runs", gone)
     del os.environ["HYPRLAND_INSTANCE_SIGNATURE"]
+    real_desktop = os.environ.get("XDG_CURRENT_DESKTOP")
+    os.environ["XDG_CURRENT_DESKTOP"] = "GNOME"  # neither Hyprland nor KDE
     try:
         await t.ListWindows().run({})
         unsupported = False
     except t.ToolError as ex:
-        unsupported = "isn't supported" in str(ex)
-    check("window tools refuse cleanly off Hyprland", unsupported)
+        unsupported = str(ex) == "window control isn't supported on this desktop yet"
+    check("window tools refuse cleanly on unsupported desktops", unsupported)
+    if real_desktop is None:
+        os.environ.pop("XDG_CURRENT_DESKTOP")
+    else:
+        os.environ["XDG_CURRENT_DESKTOP"] = real_desktop
 
     # --- launch_app: desktop entries ---
     tmp = Path(tempfile.mkdtemp())
