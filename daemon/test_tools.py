@@ -151,8 +151,9 @@ async def main():
 
     # --- definitions are strict and closed ---
     defs = [x.definition() for x in t.AUTO_TOOLS]
-    check("every tool definition is strict with additionalProperties false",
-          all(d["strict"] and d["input_schema"]["additionalProperties"] is False for d in defs))
+    check("every schema closed (additionalProperties false); strict exactly when it has arguments",
+          all(d["input_schema"]["additionalProperties"] is False
+              and d.get("strict") is (True if d["input_schema"]["properties"] else None) for d in defs))
     check("tool names match the spec's auto tier",
           [d["name"] for d in defs] == ["launch_app", "set_volume", "media_control", "get_status",
                                        "list_windows", "focus_window"])
@@ -394,7 +395,23 @@ async def confirm_tier_tests():
         "focus_window": None, "type_text": "low", "press_keys": "low", "close_window": "low", "open_url": "low",
         "screenshot": "high", "read_clipboard": "high", "run_named_command": "high",
         "list_processes": None, "list_startup": None, "kill_process": "high"}, risks)
-    check("every definition strict", all(x.definition()["strict"] for x in reg.values()))
+    check("tools with arguments are strict, argument-less ones aren't",
+          all(x.definition().get("strict") is (True if x.schema.get("properties") else None) for x in reg.values()))
+    # everything configured at once must stay within the API's strict-tool limit (a 400 otherwise)
+    import ai, cu, memory, audit as audit_mod
+    tmpd = Path(tempfile.mkdtemp())
+    full = ai.AIConfig(api_key="k", commands=cmds, homelab=t.Glances("http://x"),
+                       routines={"r": {"steps": [{"tool": "set_volume", "action": "mute"}]}})
+    asst = ai.Assistant(full, backend=object(), injector=inj, store=memory.MemoryStore(tmpd / "m.toml"),
+                        desktop=cu.AutoDesktop(None, None), audit=audit_mod.AuditLog(tmpd / "a.jsonl"))
+    n_strict = sum(1 for d in asst.tool_defs if d.get("strict"))
+    check(f"all tools configured: {len(asst.tool_defs)} tools, {n_strict} strict <= {t.MAX_STRICT}",
+          n_strict <= t.MAX_STRICT, [d["name"] for d in asst.tool_defs if d.get("strict")])
+    many = {f"x{i}": type("X", (t.Tool,), {"name": f"x{i}", "schema": t._schema({"a": {"type": "integer"}})})()
+            for i in range(25)}
+    capped = ai.Assistant(ai.AIConfig(api_key="k"), backend=object(), tools=many)
+    check("over the limit: strict dropped from the tail so requests still work",
+          sum(1 for d in capped.tool_defs if d.get("strict")) == t.MAX_STRICT)
 
 
 GLANCES_V4 = {

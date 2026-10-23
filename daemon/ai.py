@@ -353,6 +353,14 @@ class Assistant:
                 cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
         self.tools = tools
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
+        strict = [d["name"] for d in self.tool_defs if d.get("strict")]
+        if len(strict) > pc_tools.MAX_STRICT:  # the API would reject every request: drop strict from the tail
+            for d in self.tool_defs[::-1]:
+                if len([x for x in self.tool_defs if x.get("strict")]) <= pc_tools.MAX_STRICT:
+                    break
+                d.pop("strict", None)
+            log.warning("more than %d strict tools; strict dropped on some (arguments are still validated)",
+                        pc_tools.MAX_STRICT)
         routines = self.tools.get("run_routine")
         static = SYSTEM_PROMPT + (f"\n\nSaved routines: {', '.join(sorted(routines.routines))}." if routines else "")
         self._static = {"type": "text", "text": static, "cache_control": {"type": "ephemeral"}}

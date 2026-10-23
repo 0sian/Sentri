@@ -39,6 +39,7 @@ log = logging.getLogger("companion")
 
 TIMEOUT = 5.0
 MAX_WINDOWS = 40
+MAX_STRICT = 20  # API limit on tools marked strict in one request
 _call_ids = itertools.count(1)
 
 
@@ -155,8 +156,12 @@ class Tool:
         raise NotImplementedError
 
     def definition(self) -> dict:
-        return {"name": self.name, "description": self.description,
-                "input_schema": self.schema, "strict": True}
+        d = {"name": self.name, "description": self.description, "input_schema": self.schema}
+        # The API allows at most MAX_STRICT strict tools per request. Strict only adds anything for
+        # tools with arguments (and every argument is re-validated here anyway).
+        if self.schema.get("properties"):
+            d["strict"] = True
+        return d
 
 
 # -- launch_app ------------------------------------------------------------------
