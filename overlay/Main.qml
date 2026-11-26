@@ -8,13 +8,17 @@ QtObject {
     property bool debug: true
     property bool expanded: false
 
-    Component.onCompleted: console.log("screens:", Qt.application.screens.length)
+    property var rope: null     // the Rope on the primary screen
+    function pointTo(x, y) { if (rope) rope.show(x, y) }
+    function clearRope() { if (rope) rope.hide() }
 
     property var conn: Connections {
         target: bridge
         function onCommand(cmd, args) {
             if (cmd === "expand") root.expanded = true
             else if (cmd === "collapse") root.expanded = false
+            else if (cmd === "point") root.pointTo(args.x, args.y)
+            else if (cmd === "clear") root.clearRope()
             else if (cmd === "debug") root.debug = !!args.on
             else if (cmd === "quit") bridge.quit()
         }
@@ -35,6 +39,12 @@ QtObject {
             LS.Window.exclusionZone: -1
             LS.Window.keyboardInteractivity: LS.Window.KeyboardInteractivityNone
 
+            Rope {
+                anchors.fill: parent
+                visible: modelData === Qt.application.screens[0]
+                anchor: Qt.point(width / 2, notchWin.height - 8)
+                Component.onCompleted: if (visible) root.rope = this
+            }
             Rectangle {   // debug frame: proves the surface covers the screen
                 anchors.fill: parent
                 visible: root.debug
