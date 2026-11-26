@@ -226,7 +226,7 @@ behaviour the spec leaves open. None of them adds a message or field:
      `$XDG_RUNTIME_DIR/sentri-overlay.sock` as JSON lines: `point {x,y,title,text,ttl}` (x,y are
      compositor layout px, and the monitor that contains the point gets the guide), `clear`, `expand`,
      `collapse`, `debug {on}`, `quit`.
-   - **Proposed, optional:** phone → daemon `{"t":"guide_clear"}` dismisses the guide (no reply). The
+   - **Agreed and implemented (daemon + Android 1.1.0 Clear button):** phone → daemon `{"t":"guide_clear"}` dismisses the guide (no reply). The
      daemon already handles it; old and new apps can ignore it.
    - Tested on Hyprland, including a second monitor at scale 1.5 (virtual output). Not yet tested on KDE.
 
