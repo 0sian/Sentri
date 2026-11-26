@@ -10,6 +10,7 @@ import types
 
 import ai
 import gaze
+import pc_tools
 import guide
 
 failures = []
@@ -45,6 +46,7 @@ class StubAssistant:
     notch_card_done = ai.Assistant.notch_card_done
     _overlay_event = ai.Assistant._overlay_event
     _fire = ai.Assistant._fire
+    notch_peek = ai.Assistant.notch_peek
 
     def __init__(self, overlay, script):
         self.overlay, self.script = overlay, script
@@ -207,6 +209,31 @@ async def main():
         await asyncio.sleep(0.3)
         t.cancel(); srv.close()
         check("Overlay.listen delivers events and skips junk lines", seen == [{"event": "confirm", "call": "c7", "allow": True}], seen)
+
+    # --- homelab peek ---
+    rows = pc_tools.glances_peek_rows("fs", "/data (ext4): 93% of 3.6 GB (1 GB free)\n/ (ext4): 84% of 233 GB\n/boot: 12% of 1 GB")
+    check("peek levels: >=90 red, >=80 amber, else ok", [r["l"] for r in rows] == [2, 1, 0], rows)
+    rows = pc_tools.glances_peek_rows("containers", "web: running (3 days)\ndb: exited (1)\nq: Up 2 hours\n(+4 more)")
+    check("peek containers: only not-running ones are red", [r["l"] for r in rows] == [0, 2, 0, 0], rows)
+    rows = pc_tools.glances_peek_rows("sensors", "CPU: 88C\nGPU: 92C\nNVMe: 40C")
+    check("peek sensors thresholds", [r["l"] for r in rows] == [1, 2, 0], rows)
+    rows = pc_tools.glances_peek_rows("uptime", "\n".join(f"line {i} " + "x" * 80 for i in range(9)))
+    check("peek rows capped and clipped", len(rows) == pc_tools.PEEK_ROWS and all(len(r["t"]) <= pc_tools.PEEK_WIDTH for r in rows), rows)
+
+    ov = RecOverlay()
+    h = pc_tools.HomelabStats(pc_tools.Glances("http://x", "/api/4", "", ""))
+    h._get = lambda plugin: {"percent": 95.0, "used": 9e9, "total": 1e10}
+    got = []
+    h.peek = lambda title, rows: got.append((title, rows))
+    out = await h.run({"section": "mem"})
+    check("homelab_stats peeks its result", got and got[0][0] == "memory" and got[0][1][0]["l"] == 2 and "Memory 95%" in out, got)
+    h.peek = lambda title, rows: 1 / 0
+    out = await h.run({"section": "mem"})
+    check("a failing peek doesn't break the tool", "Memory 95%" in out)
+    a = StubAssistant(ov, plain)
+    a.notch_peek = lambda *x, **k: ai.Assistant.notch_peek(a, *x, **k)
+    a.notch_peek("memory", [{"t": "Memory 95%", "l": 2}]); await settle()
+    check("notch_peek sends a peek command without spawning", ov.msgs and ov.msgs[0]["cmd"] == "peek" and ov.msgs[0]["rows"][0]["l"] == 2 and not ov.rows[0][1], ov.msgs)
 
     # moods
     ov = RecOverlay()

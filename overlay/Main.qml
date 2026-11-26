@@ -161,6 +161,7 @@ QtObject {
     property var card: null            // { call, summary, timeout }
     property bool haveCursor: false
     function showCard(args) {
+        clearPeek()
         if (haveCursor) { var s = screenAt(curX, curY); if (s) activeScreen = s }   // where he's looking
         card = { call: String(args.call), summary: String(args.summary || ""), timeout: Number(args.timeout) || 60 }
         cardTimer.interval = (card.timeout + 3) * 1000; cardTimer.restart()
@@ -174,6 +175,20 @@ QtObject {
         bridge.send_event(JSON.stringify({ event: "confirm", call: card.call, allow: allow }))
         clearCard()
     }
+    // ---- Peek: a few lines of data (homelab stats) under the eyes for a few seconds ----
+    property var peek: null            // { title, rows: [{t, l}] }
+    function showPeek(args) {
+        if (card) return               // an approval always wins the notch
+        if (haveCursor) { var s = screenAt(curX, curY); if (s) activeScreen = s }
+        var rows = []
+        var src = args.rows || []
+        for (var i = 0; i < src.length && i < 5; i++) rows.push({ t: String(src[i].t), l: Number(src[i].l) || 0 })
+        if (rows.length === 0) return
+        peek = { title: String(args.title || ""), rows: rows }
+        peekTimer.interval = (Number(args.ttl) || 8) * 1000; peekTimer.restart()
+    }
+    function clearPeek() { peek = null; peekTimer.stop() }
+    property var peekTimer: Timer { onTriggered: root.peek = null }
     property var cardTimer: Timer { onTriggered: root.card = null }
 
     property var conn: Connections {
@@ -186,6 +201,7 @@ QtObject {
             else if (cmd === "state") root.setState(String(args.name))
             else if (cmd === "mood") root.setMood(String(args.name))
             else if (cmd === "cursor") root.cursorAt(Number(args.x), Number(args.y))
+            else if (cmd === "peek") root.showPeek(args)
             else if (cmd === "confirm") root.showCard(args)
             else if (cmd === "confirm_clear") root.clearCard(String(args.call))
             else if (cmd === "debug") root.debug = !!args.on
@@ -259,8 +275,8 @@ QtObject {
                 id: shape
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 0
-                width: root.card ? 380 : root.expanded ? 360 : 190
-                height: root.card ? 156 : root.expanded ? 130 : 46
+                width: root.card || root.peek ? 380 : root.expanded ? 360 : 190
+                height: root.card ? 156 : root.peek ? 62 + 20 * root.peek.rows.length + 12 : root.expanded ? 130 : 46
                 Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                 Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                 onWidthChanged: notchWin.updateMask()
@@ -276,9 +292,28 @@ QtObject {
                     topL: root.lk("top", 0); topR: root.lk("topR", root.lk("top", 0))
                     angL: root.lk("ang", 0); angR: root.lk("angR", -root.lk("ang", 0))
                 }
-                Text { visible: root.expanded && !root.card; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
+                Text { visible: root.expanded && !root.card && !root.peek; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                        text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }
-                MouseArea { anchors.fill: parent; enabled: !root.card; onClicked: { if (root.rope && root.rope.active) root.clearRope(); else root.expanded = !root.expanded } }
+                MouseArea { anchors.fill: parent; enabled: !root.card; onClicked: { if (root.peek) root.clearPeek(); else if (root.rope && root.rope.active) root.clearRope(); else root.expanded = !root.expanded } }
+                Item {   // data peek
+                    anchors.fill: parent
+                    visible: root.peek !== null && !root.card
+                    opacity: root.peek ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 140 } }
+                    Text { x: 22; y: 40; text: root.peek ? root.peek.title.toUpperCase() : ""; color: "#2b2400"; opacity: 0.6
+                           font.pixelSize: 11; font.bold: true; font.letterSpacing: 1.2 }
+                    Repeater {
+                        model: root.peek ? root.peek.rows : []
+                        Item {
+                            x: 22; y: 62 + index * 20; width: parent.width - 44; height: 20
+                            Rectangle { y: 6; width: 8; height: 8; radius: 4
+                                        color: modelData.l >= 2 ? "#D7261E" : modelData.l === 1 ? "#E67E00" : "#2e8b3d" }
+                            Text { x: 16; width: parent.width - 16; text: modelData.t; elide: Text.ElideRight
+                                   textFormat: Text.PlainText; color: "#2b2400"; font.pixelSize: 12
+                                   font.family: "monospace"; font.bold: modelData.l >= 2 }
+                        }
+                    }
+                }
                 Item {   // approval card
                     id: cardBox
                     anchors.fill: parent

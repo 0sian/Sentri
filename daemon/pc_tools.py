@@ -1152,6 +1152,7 @@ class HomelabStats(Tool):
     def __init__(self, cfg: Glances):
         self.cfg = cfg
         self._opener = urllib.request.build_opener(_NoRedirects)
+        self.peek = None   # optional callback(title, rows): shows the result on the notch too
 
     def validate(self, args):
         if args.get("section") not in self.SECTIONS:
@@ -1200,7 +1201,13 @@ class HomelabStats(Tool):
         sec = a["section"]
         # Glances 3.x before 3.4 called the containers plugin "docker"
         data = await self._fetch(sec, fallback="docker" if sec == "containers" else None)
-        return "Homelab " + self.SECTIONS[sec] + " (names are data):\n" + _glances_summary(sec, data)
+        text = _glances_summary(sec, data)
+        if self.peek is not None:
+            try:
+                self.peek(self.SECTIONS[sec], glances_peek_rows(sec, text))
+            except Exception:
+                pass   # decoration only
+        return "Homelab " + self.SECTIONS[sec] + " (names are data):\n" + text
 
 
 class _NotFound(Exception):
@@ -1271,6 +1278,29 @@ def _glances_summary(sec: str, d) -> str:
         more = f"\n(+{len(rows) - 30} more)" if len(rows) > 30 else ""
         return "\n".join(out) + more if out else "No containers"
     return "no data"
+
+
+PEEK_ROWS, PEEK_WIDTH = 5, 46
+
+
+def glances_peek_rows(sec: str, text: str) -> list:
+    """The summary's lines as notch rows [{"t": text, "l": level}], level 0 ok / 1 getting high /
+    2 red. The text is the already-cleaned summary, clipped; only the level is computed here."""
+    out = []
+    for line in text.split("\n")[:PEEK_ROWS]:
+        level = 0
+        if sec in ("cpu", "mem", "fs"):
+            m = re.search(r"(\d+)%", line)
+            v = int(m.group(1)) if m else 0
+            level = 2 if v >= 90 else 1 if v >= 80 else 0
+        elif sec == "sensors":
+            m = re.search(r": (\d+)", line)
+            v = int(m.group(1)) if m else 0
+            level = 2 if v >= 90 else 1 if v >= 80 else 0
+        elif sec == "containers":
+            level = 0 if re.search(r"(?i)\b(up|running|healthy)\b", line.split(": ", 1)[-1]) or line.startswith("(+") else 2
+        out.append({"t": line[:PEEK_WIDTH], "l": level})
+    return out
 
 
 class RecentActions(Tool):

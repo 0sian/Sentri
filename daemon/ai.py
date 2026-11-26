@@ -386,6 +386,8 @@ class Assistant:
                 sensitivity.Policy(cfg.guide_safe_apps, cfg.guide_ask_words))
             tools["clear_guide"] = guide.ClearGuide(self.overlay)
         self.tools = tools
+        if self.overlay is not None and isinstance(tools.get("homelab_stats"), pc_tools.HomelabStats):
+            tools["homelab_stats"].peek = self.notch_peek
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
         strict = [d["name"] for d in self.tool_defs if d.get("strict")]
         if len(strict) > pc_tools.MAX_STRICT:  # the API would reject every request: drop strict from the tail
@@ -452,6 +454,11 @@ class Assistant:
         self._fire(self.overlay.send({"cmd": "confirm", "call": call, "summary": summary, "timeout": timeout},
                                      spawn=False))
         return True
+
+    def notch_peek(self, title: str, rows: list, ttl: int = 8):
+        """Show a result (homelab stats) in the notch for a few seconds. Needs the overlay already up."""
+        if self.overlay is not None:
+            self._fire(self.overlay.send({"cmd": "peek", "title": title, "rows": rows, "ttl": ttl}, spawn=False))
 
     def notch_card_done(self, call: str):
         if self._card_waiters.pop(call, None) is not None:
