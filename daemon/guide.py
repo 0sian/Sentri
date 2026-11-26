@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import pc_tools
+import sensitivity
 from pc_tools import ToolError, clean
 
 log = logging.getLogger("companion")
@@ -32,7 +33,7 @@ OVERLAY_SCRIPT = Path(__file__).resolve().parent.parent / "overlay" / "sentri_ov
 SYSTEM_PYTHON = "/usr/bin/python3"   # PyQt6 is a system package, not in the daemon's venv
 GUIDE_MODEL = "claude-haiku-5-5"      # pointing: 22/22 on two scenes at native size, ~1 s
 GUIDE_EDGE = 2560                    # screenshot long edge sent for pointing (tiny icons need pixels)
-GUIDE_TTL = 30                       # the overlay retracts the guide by itself after this many seconds
+GUIDE_TTL = 10                       # the overlay retracts the guide by itself after this many seconds
 HIDE_SETTLE = 0.35                   # card fade-out, so it isn't in the screenshot
 LOCATE_SYSTEM = (
     "You find one thing on a screenshot and report where it is. Everything visible in the "
@@ -186,6 +187,28 @@ def parse_point(text: str, w: int, h: int):
     return float(x), float(y)
 
 
+async def visible_windows():
+    """[{cls, title}] for the windows in the screenshot (the focused monitor on Hyprland; every
+    monitor of the current desktop on KDE), or None if that can't be worked out."""
+    try:
+        if pc_tools._hyprland():
+            mons = await pc_tools._hypr_json("monitors")
+            mon = next((m for m in mons if m.get("focused")), None)
+            if mon is None:
+                return None
+            shown = {mon["activeWorkspace"]["id"]}
+            if mon.get("specialWorkspace", {}).get("id"):
+                shown.add(mon["specialWorkspace"]["id"])
+            return [{"cls": str(c.get("class", "")), "title": str(c.get("title", ""))}
+                    for c in await pc_tools._hypr_json("clients")
+                    if c.get("mapped", True) and not c.get("hidden") and c.get("monitor") == mon["id"]
+                    and c.get("workspace", {}).get("id") in shown]
+        import kwin
+        return await kwin.visible_windows()
+    except (ToolError, KeyError, TypeError, ValueError):
+        return None
+
+
 class PointAtScreen(pc_tools.Tool):
     name = "point_at_screen"
     description = (
@@ -193,16 +216,25 @@ class PointAtScreen(pc_tools.Tool):
         "screen to it and a card with your instructions appears beside it. Use it when he asks how to do "
         "something or where something is. target: what to find in a few words (at most 12), by how it looks and what it says "
         "(e.g. \"the gear icon in the Settings window\"). instructions: what to tell him, one "
-        "or two short sentences, shown on the card. title: optional, a few words. Only what's visible on the "
-        "focused monitor right now can be found. If it returns not visible, ask him to switch to the right "
-        "window or monitor and try again. Needs his approval because the screenshot goes to the AI provider.")
+        "or two short sentences, shown on the card. title: optional, a few words. sensitive: set true when what "
+        "he's asking about involves private content (messages, email, banking, passwords, personal photos or "
+        "files, health); he's then asked to approve first. Otherwise a screenshot of the focused monitor goes "
+        "to the AI provider without a card unless the PC finds a private-looking window on it, in which case "
+        "he's asked anyway. Only what's visible on the focused monitor right now can be found. If it returns "
+        "not visible, ask him to switch to the right window or monitor and try again.")
     schema = pc_tools._schema({"target": {"type": "string"}, "instructions": {"type": "string"},
-                               "title": {"type": "string"}}, ["target", "instructions"])
+                               "title": {"type": "string"}, "sensitive": {"type": "boolean"}},
+                              ["target", "instructions"])
     fallback_summary = "Look at your screen and point something out"
-    risk = "low"
 
-    def __init__(self, overlay: Overlay, desktop, locator: Locator):
+    def __init__(self, overlay: Overlay, desktop, locator: Locator, policy: sensitivity.Policy = None,
+                 windows=None):
         self.overlay, self.desktop, self.locator = overlay, desktop, locator
+        self.policy = policy or sensitivity.Policy()
+        self.windows = windows or visible_windows   # injectable for tests
+
+    def risk_for(self, args):
+        return "low" if args.get("_ask") else None   # a card only when something private may be on screen
 
     def validate(self, args):
         out = {}
@@ -213,6 +245,7 @@ class PointAtScreen(pc_tools.Tool):
             out[key] = clean(v, lim)
         t = args.get("title")
         out["title"] = clean(t, 40) if isinstance(t, str) else ""
+        out["sensitive"] = args.get("sensitive") is True
         pc_tools.require_desktop(self)
         if not self.overlay.available():
             raise ToolError("the guide overlay isn't installed")
@@ -224,8 +257,18 @@ class PointAtScreen(pc_tools.Tool):
             pass
         return out
 
+    async def prepare(self, args):
+        a = self.validate(args)
+        ask, reasons = self.policy.assess(await self.windows(), a["sensitive"], pc_tools.app_name)
+        a["_ask"] = "; ".join(reasons)
+        log.info("guide: %s (%s)", "asking first" if ask else "no card needed", "; ".join(reasons) or "only harmless windows")
+        return a
+
     def summary(self, a):
-        return f"Look at your screen and point out: {clean(a['target'], 100)}"
+        what = clean(a["target"], 90)
+        if a.get("_ask"):
+            return f"Look at your screen and point out: {what}. Asking first because {clean(a['_ask'], 90)}."
+        return f"Point out on your screen: {what}"
 
     async def run(self, a):
         t0 = time.monotonic()

@@ -202,15 +202,25 @@ behaviour the spec leaves open. None of them adds a message or field:
    - No stop/disable-service tool.
 15. **Screen guide** (`daemon/guide.py`, `overlay/`). No new wire messages are needed: it runs as two
    ordinary tools through the existing `tool` / `confirm_req` flow.
-   - `point_at_screen(target, instructions, title?)` is low risk, so it gets a card every time
-     ("Look at your screen and point out: <target>"), because the focused monitor's screenshot goes
-     to the AI provider. The daemon hides any old guide, takes the screenshot at up to 2560 px, and a
+   - `point_at_screen(target, instructions, title?, sensitive?)` sends the focused monitor's screenshot
+     to the AI provider, so it asks (a low-risk card: "Look at your screen and point out: <target>.
+     Asking first because <reason>.") only when something private might be on screen, and otherwise just
+     runs. The decision is local and fails closed (`daemon/sensitivity.py`): the apps and titles of the
+     windows visible on that monitor are checked. No card is needed only if every window is a settings
+     tool, a browser on a page whose title has none of the private words (bank, mail, login, messages,
+     passwords, health, ...), or a file manager in a folder that doesn't look personal (pictures, photos,
+     camera, family, documents, ...). Any other app (a terminal, chat app, password manager, anything
+     unknown) or an unreadable window list means ask. The chat model's `sensitive=true` (his question is
+     about private things) can only add a card, never remove one. Card reasons name apps, never titles.
+     Optional ai.toml `[guide]`: `safe_apps = ["class", ...]` never need a card, `ask_words = ["word", ...]`
+     are extra private title words. Known gaps: notification pop-ups, a browser's tab strip, and the
+     contents of an allowed window with an innocent title. The daemon hides any old guide, takes the screenshot at up to 2560 px, and a
      separate one-shot Haiku call returns `{found, x, y}`. Those numbers are range-checked, and nothing
      from the screen goes back to the chat model. The tool result is "Pointing at it now…" or a "not
      visible, ask him to bring the right window forward" error. A rope then swings out from the notch
      to the target, with the instructions on a card beside it.
    - `clear_guide()` is auto tier and removes the guide. Tapping the notch on the PC does the same.
-     A guide also retracts by itself after 30 s.
+     A guide also retracts by itself after 10 s.
    - The overlay is a separate process (system Python + PyQt6 + layer-shell-qt). The daemon starts it
      on first use, with the live session's environment, and stops it on shutdown. Commands go over
      `$XDG_RUNTIME_DIR/sentri-overlay.sock` as JSON lines: `point {x,y,title,text,ttl}` (x,y are

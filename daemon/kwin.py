@@ -82,6 +82,16 @@ async def windows() -> list:
     return [r for r in rows if isinstance(r, dict) and WINDOW_ID.match(str(r.get("id", "")))]
 
 
+async def visible_windows() -> list:
+    """Windows that can be seen right now (not minimised, on the current desktop, any monitor):
+    [{cls, title}]. Titles are untrusted; the sensitivity check only pattern-matches them."""
+    rows = await evaluate(
+        "return workspace.windowList().filter(function(w) { return w.normalWindow && !w.minimized && "
+        "(w.onAllDesktops || w.desktops.length === 0 || w.desktops.indexOf(workspace.currentDesktop) >= 0); })"
+        ".map(function(w) { return {cls: String(w.resourceClass), title: String(w.caption)}; });")
+    return [r for r in rows if isinstance(r, dict)]
+
+
 def _check(window_id: str):
     if not WINDOW_ID.match(window_id):
         raise ToolError("not a window id")

@@ -52,6 +52,7 @@ import cu
 import guide
 import memory
 import pc_tools
+import sensitivity
 
 log = logging.getLogger("companion")
 
@@ -117,7 +118,9 @@ card shows your short instructions beside it, so write them for that card. For t
 12 words what he's after in his own terms plus how it looks or what it says; you can't see his screen, so never \
 guess where on it the thing is or what his layout looks like, the lookup works that out. It only sees the focused monitor, so if it comes back \
 not visible, ask him to bring the right window forward and try again. clear_guide removes it. \
-Don't use it to click for him: it only points.
+It asks him first only when something private might be on screen (or you set sensitive=true \
+because his question is about private things: messages, email, banking, passwords, personal \
+photos or files, health); otherwise it just runs. Don't use it to click for him: it only points.
 - Memory: the "Things Osian has told you" block holds facts he asked you to keep. Use remember \
 only for durable facts or preferences he states, or things he asks you to remember; never \
 trivia, and never passwords, keys or other secrets. When you save something, say so in your \
@@ -150,6 +153,8 @@ class AIConfig:
     confirm_timeout: int = 60
     open_url_allow: list = dataclasses.field(default_factory=list)
     commands: list = dataclasses.field(default_factory=list)  # [pc_tools.NamedCommand]
+    guide_safe_apps: list = dataclasses.field(default_factory=list)  # window classes that never need a card for the guide
+    guide_ask_words: list = dataclasses.field(default_factory=list)  # extra title words that make a window private-looking
     routines: dict = dataclasses.field(default_factory=dict)  # raw tables; validated in pc_tools.load_routines
     homelab: pc_tools.Glances = None
     cu: "cu.CUConfig" = None  # computer-use sessions; None = off
@@ -214,6 +219,14 @@ def load_config(path: Path = AI_CONFIG):
         if isinstance(extra, list) and all(isinstance(x, str) for x in extra):
             c.blocklist = tuple(c.blocklist) + tuple(x.lower() for x in extra)  # adds to the defaults
         cfg.cu = c
+    g = data.get("guide")
+    if isinstance(g, dict):
+        for key, field in (("safe_apps", "guide_safe_apps"), ("ask_words", "guide_ask_words")):
+            v = g.get(key, [])
+            if isinstance(v, list) and all(isinstance(x, str) and x for x in v):
+                setattr(cfg, field, [x.lower() for x in v])
+            else:
+                log.error("ai.toml: ignoring invalid [guide] %s (needs a list of strings)", key)
     h = data.get("homelab")
     if isinstance(h, dict):
         u = urllib.parse.urlsplit(str(h.get("url", "")))
@@ -363,7 +376,8 @@ class Assistant:
         if desktop is not None and "point_at_screen" not in tools:
             self.overlay = self.overlay or guide.Overlay()
             tools["point_at_screen"] = guide.PointAtScreen(
-                self.overlay, desktop, guide.Locator(self.backend, guide.GUIDE_MODEL, self._check_budget, self._add_usage))
+                self.overlay, desktop, guide.Locator(self.backend, guide.GUIDE_MODEL, self._check_budget, self._add_usage),
+                sensitivity.Policy(cfg.guide_safe_apps, cfg.guide_ask_words))
             tools["clear_guide"] = guide.ClearGuide(self.overlay)
         self.tools = tools
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix

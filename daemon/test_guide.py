@@ -132,11 +132,29 @@ async def main():
 
         # --- point_at_screen ---
         loc = FakeLocator((960.0, 540.0))
-        tool = guide.PointAtScreen(ov, desk, loc)
-        args = tool.validate({"target": "the gear icon", "instructions": "Click the gear.", "title": "Step 1"})
-        check("validate keeps the three fields", args == {"target": "the gear icon", "instructions": "Click the gear.", "title": "Step 1"})
-        check("tool needs a card (risk set), screenshot goes to the provider", tool.needs_confirm(args) and tool.risk == "low")
+        screen = {"windows": [{"cls": "systemsettings", "title": "Display"}]}
+
+        async def fake_windows():
+            return screen["windows"]
+        tool = guide.PointAtScreen(ov, desk, loc, windows=fake_windows)
+        args = await tool.prepare({"target": "the gear icon", "instructions": "Click the gear.", "title": "Step 1"})
+        check("prepare keeps the fields", (args["target"], args["instructions"], args["title"], args["sensitive"]) ==
+              ("the gear icon", "Click the gear.", "Step 1", False))
+        check("only harmless windows: no card", not tool.needs_confirm(args) and tool.risk_for(args) is None)
         check("summary names the target only", "gear icon" in tool.summary(args) and "Click the gear" not in tool.summary(args))
+        screen["windows"] = [{"cls": "systemsettings", "title": "Display"}, {"cls": "discord", "title": "Dave - Discord"}]
+        priv = await tool.prepare({"target": "the gear icon", "instructions": "Click the gear."})
+        check("private-looking window visible: card (low risk)", tool.needs_confirm(priv) and tool.risk_for(priv) == "low")
+        check("card says why, by app name and without the title", "asking first" in tool.summary(priv).lower()
+              and "Dave" not in tool.summary(priv), tool.summary(priv))
+        screen["windows"] = [{"cls": "systemsettings", "title": "Display"}]
+        flagged = await tool.prepare({"target": "x", "instructions": "y", "sensitive": True})
+        check("model's sensitive=true adds a card", tool.needs_confirm(flagged))
+        notbool = await tool.prepare({"target": "x", "instructions": "y", "sensitive": "false"})
+        check("sensitive must be literally true (a string isn't)", notbool["sensitive"] is False and not tool.needs_confirm(notbool))
+        screen["windows"] = None
+        check("windows unreadable: card", tool.needs_confirm(await tool.prepare({"target": "x", "instructions": "y"})))
+        screen["windows"] = [{"cls": "systemsettings", "title": "Display"}]
         before = len(ov.sent())
         desk.on_shot = lambda: None
         out = await tool.run(args)
