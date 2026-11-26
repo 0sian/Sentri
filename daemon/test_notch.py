@@ -225,10 +225,18 @@ async def main():
     h._get = lambda plugin: {"percent": 95.0, "used": 9e9, "total": 1e10}
     got = []
     h.peek = lambda title, rows: got.append((title, rows))
+    out = await h.run({"section": "fs"})
+    await asyncio.sleep(0.05)
+    check("multi-line sections peek their own rows", got and got[0][0] == "disk usage", got)
+    got.clear()
     out = await h.run({"section": "mem"})
-    check("homelab_stats peeks its result", got and got[0][0] == "memory" and got[0][1][0]["l"] == 2 and "Memory 95%" in out, got)
+    await asyncio.sleep(0.1)
+    rows = got[0][1] if got else []
+    check("a one-line section peeks a small overview", got and got[0][0] == "homelab" and len(rows) >= 4
+          and rows[0]["t"].startswith(("Up", "CPU")) and any(r["t"].startswith("Memory 95%") and r["l"] == 2 for r in rows) and "Memory 95%" in out, got)
     h.peek = lambda title, rows: 1 / 0
     out = await h.run({"section": "mem"})
+    await asyncio.sleep(0.1)
     check("a failing peek doesn't break the tool", "Memory 95%" in out)
     a = StubAssistant(ov, plain)
     a.notch_peek = lambda *x, **k: ai.Assistant.notch_peek(a, *x, **k)

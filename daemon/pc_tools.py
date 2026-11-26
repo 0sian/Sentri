@@ -1153,6 +1153,7 @@ class HomelabStats(Tool):
         self.cfg = cfg
         self._opener = urllib.request.build_opener(_NoRedirects)
         self.peek = None   # optional callback(title, rows): shows the result on the notch too
+        self._peek_tasks = set()
 
     def validate(self, args):
         if args.get("section") not in self.SECTIONS:
@@ -1203,11 +1204,31 @@ class HomelabStats(Tool):
         data = await self._fetch(sec, fallback="docker" if sec == "containers" else None)
         text = _glances_summary(sec, data)
         if self.peek is not None:
-            try:
-                self.peek(self.SECTIONS[sec], glances_peek_rows(sec, text))
-            except Exception:
-                pass   # decoration only
+            task = asyncio.ensure_future(self._peek(sec, data, text))   # never delays the answer
+            self._peek_tasks.add(task)
+            task.add_done_callback(self._peek_tasks.discard)
         return "Homelab " + self.SECTIONS[sec] + " (names are data):\n" + text
+
+
+    OVERVIEW = ("uptime", "cpu", "mem", "load", "fs")   # the small dashboard's rows
+    ONE_LINERS = ("uptime", "cpu", "mem", "load")        # asking for one of these shows the dashboard
+
+    async def _peek(self, sec, data, text):
+        """The notch gets more than a one-line answer: for a one-line section, a few headline numbers
+        from the same fixed read-only endpoints (fetched here, not handed to the model)."""
+        try:
+            if sec in self.ONE_LINERS:
+                got = {sec: data}
+                others = [x for x in self.OVERVIEW if x != sec]
+                res = await asyncio.gather(*(self._fetch(x) for x in others), return_exceptions=True)
+                got.update({x: r for x, r in zip(others, res) if not isinstance(r, BaseException)})
+                title, rows = "homelab", overview_rows(got)
+            else:
+                title, rows = self.SECTIONS[sec], glances_peek_rows(sec, text)
+            if rows:
+                self.peek(title, rows)
+        except Exception:
+            pass   # decoration only
 
 
 class _NotFound(Exception):
@@ -1281,6 +1302,30 @@ def _glances_summary(sec: str, d) -> str:
 
 
 PEEK_ROWS, PEEK_WIDTH = 5, 46
+
+
+def overview_rows(got: dict) -> list:
+    """Headline lines for the notch from whichever of uptime/cpu/mem/load/fs came back."""
+    out = []
+    for sec in HomelabStats.OVERVIEW:
+        d = got.get(sec)
+        if d is None:
+            continue
+        try:
+            if sec == "cpu":
+                line = f"CPU {_num(d.get('total')):.0f}%  ({int(_num(d.get('cpucore')))} cores)"
+            elif sec == "mem":
+                line = f"Memory {_num(d.get('percent')):.0f}%  ({_gb(d.get('used'))} of {_gb(d.get('total'))})"
+            elif sec == "load":
+                line = f"Load {_num(d.get('min1')):.2f} {_num(d.get('min5')):.2f} {_num(d.get('min15')):.2f}"
+            else:
+                line = _glances_summary(sec, d).split("\n")[0]    # uptime; fs: the fullest disk
+                if sec == "fs":     # "/dev/x (btrfs): 75% of 255 GB (62 GB free)" -> "/dev/x: 75% (62 GB free)"
+                    line = re.sub(r" of [\d.]+ \w+", "", re.sub(r" \([^)]*\)(?=:)", "", line))
+        except Exception:
+            continue
+        out += glances_peek_rows("fs" if sec == "fs" else sec, line)[:1]
+    return out
 
 
 def glances_peek_rows(sec: str, text: str) -> list:
