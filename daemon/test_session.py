@@ -75,7 +75,7 @@ async def gating_tests():
     login_screen_ok = sorted(n for n, t in reg.items() if not t.needs_desktop)
     check("tools that work at the login screen", login_screen_ok ==
           ["get_status", "kill_process", "list_processes", "list_startup", "media_control", "run_named_command",
-           "set_volume"], login_screen_ok)
+           "set_volume", "system_doctor"], login_screen_ok)
 
     class Needs(pc_tools.Tool):
         name = "launch_app"

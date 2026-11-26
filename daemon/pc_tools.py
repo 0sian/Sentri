@@ -1392,6 +1392,7 @@ def registry(injector=None, allow_hosts=(), commands=(), routines=None, store=No
              homelab: Glances = None) -> dict:
     """All tools for this daemon. Keyboard tools need an injector (the daemon's virtual input);
     run_named_command / routines / memory tools only exist when configured."""
+    import doctor
     import procs
     tools = list(AUTO_TOOLS) + [procs.ListProcesses(), procs.ListStartup(),
                                 CloseWindow(), OpenUrl(allow_hosts), Screenshot(), ReadClipboard(), procs.KillProcess()]
@@ -1403,6 +1404,7 @@ def registry(injector=None, allow_hosts=(), commands=(), routines=None, store=No
         tools += [Remember(store, tainted or (lambda: True)), Forget(store), ListMemories(store)]
     if homelab is not None:
         tools.append(HomelabStats(homelab))
+    tools.append(doctor.SystemDoctor())   # last: the tool order is part of the cached prompt prefix
     reg = {t.name: t for t in tools}
     loaded = load_routines(routines, reg) if routines else []
     if loaded:

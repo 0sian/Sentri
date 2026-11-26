@@ -12,13 +12,14 @@ import logging
 import re
 import time
 
+import alerts as alerts_mod
 import pc_tools
 
 log = logging.getLogger("companion.homelab")
 
 INTERVAL = 300          # seconds between polls
 FIRST_DELAY = 20        # let the connection settle; the first poll is only a baseline for containers
-REMIND = 2 * 3600
+REMIND = alerts_mod.REMIND
 BUSY_RETRY = 20         # a chat turn is running: try the notification again shortly
 LIMIT = 90
 UP = re.compile(r"(?i)\b(up|running|healthy)\b")
@@ -54,7 +55,7 @@ class Watcher:
         busy() is True while a chat turn is running."""
         self.fetch, self.notify, self.busy, self.interval, self.clock = fetch, notify, busy, interval, clock
         self.seen_up = set()
-        self.notified = {}      # key -> when it was shown
+        self.tracker = alerts_mod.Tracker(REMIND, clock)
         self.cpu_hits = 0
         self.fails = 0
 
@@ -78,18 +79,12 @@ class Watcher:
         self.cpu_hits = self.cpu_hits + 1 if cpu_hot else 0
         if self.cpu_hits >= 2:
             alerts.append(("cpu", f"CPU {pc_tools._num(cpu.get('total')):.0f}% busy"))
-        now = self.clock()
-        keys = {k for k, _ in alerts}
-        for k in list(self.notified):
-            if k not in keys:
-                del self.notified[k]          # cleared: a repeat will be news again
-        due = [(k, t) for k, t in alerts if k not in self.notified or now - self.notified[k] >= REMIND]
+        due = self.tracker.due(alerts)
         if due:
             if self.busy():
                 return BUSY_RETRY
             self.notify([{"t": t[:pc_tools.PEEK_WIDTH], "l": 2} for _, t in due[:pc_tools.PEEK_ROWS]], 12)
-            for k, _ in due:
-                self.notified[k] = now
+            self.tracker.mark(k for k, _ in due)
         return self.interval
 
     async def run(self):

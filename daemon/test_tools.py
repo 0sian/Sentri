@@ -394,7 +394,7 @@ async def confirm_tier_tests():
         "launch_app": None, "set_volume": None, "media_control": None, "get_status": None, "list_windows": None,
         "focus_window": None, "type_text": "low", "press_keys": "low", "close_window": "low", "open_url": "low",
         "screenshot": "high", "read_clipboard": "high", "run_named_command": "high",
-        "list_processes": None, "list_startup": None, "kill_process": "high"}, risks)
+        "list_processes": None, "list_startup": None, "kill_process": "high", "system_doctor": None}, risks)
     check("tools with arguments are strict, argument-less ones aren't",
           all(x.definition().get("strict") is (True if x.schema.get("properties") else None) for x in reg.values()))
     # everything configured at once must stay within the API's strict-tool limit (a 400 otherwise)
