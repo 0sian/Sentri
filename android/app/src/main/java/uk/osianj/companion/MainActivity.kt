@@ -49,6 +49,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 enum class Screen(val title: String) {
     Companion("Sentri"),
     Controller("Controller"),
+    Actions("Quick actions"),
     Settings("Settings"),
 }
 
@@ -114,6 +115,7 @@ fun App(vm: CompanionViewModel) {
             when (screen) {
                 Screen.Companion -> CompanionScreen(vm)
                 Screen.Controller -> ControlScreen(vm)
+                Screen.Actions -> ActionsScreen(vm)
                 Screen.Settings -> SettingsScreen(vm) { screen = Screen.Companion }
             }
         }

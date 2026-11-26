@@ -110,7 +110,27 @@ class CompanionViewModel(app: Application) : AndroidViewModel(app) {
     }
     private val dispatcher = ChatDispatcher(viewModelScope, chatHost)
 
+    // ---- Quick actions --------------------------------------------------
+    var actions by mutableStateOf(ActionsState())
+        private set
+
+    /** Run one tile. The screen has already shown the item's confirm dialog (if it has one) and got a yes. */
+    fun runAction(item: QuickAction) {
+        if (actions.running != null) return
+        val (next, rid) = actions.start(item)
+        if (!link.action(item.id, rid, item.confirm != null)) {
+            actions = actions.copy(note = "Not connected", noteOk = false, noteSeq = actions.noteSeq + 1)
+            return
+        }
+        actions = next
+        viewModelScope.launch {
+            delay(12_000)
+            actions = actions.timedOut(rid)
+        }
+    }
+
     init {
+        link.actionsHandler = { m -> actions = actions.onServer(m) }
         link.chatHandler = { m ->
             if (m.optString("t") == "cu_session") {
                 val u = cuFrom(m, System.currentTimeMillis(), cu)
@@ -141,6 +161,7 @@ class CompanionViewModel(app: Application) : AndroidViewModel(app) {
             link.state.collect { st ->
                 if (st !is Link.State.Connected) {
                     chat = chat.disconnected()
+                    actions = actions.disconnected()
                     endGuide()
                     if (cu != null) { cu = null; cuNote = "Computer use ended: connection lost" }
                 }

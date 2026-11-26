@@ -46,6 +46,9 @@ class Link(private val scope: CoroutineScope) {
     /** Called on the main thread, in order, for chat_* / tool / confirm_req / cu_session messages. */
     var chatHandler: ((JSONObject) -> Unit)? = null
 
+    /** Called on the main thread, in order, for `actions` / `action_result` (Quick actions). */
+    var actionsHandler: ((JSONObject) -> Unit)? = null
+
     /** Called on the main thread when the daemon's `ok` includes the PC's MAC address (for Wake-on-LAN). */
     var macHandler: ((String) -> Unit)? = null
 
@@ -148,6 +151,7 @@ class Link(private val scope: CoroutineScope) {
                         else (0 until arr.length()).map { arr.optString(it) }.toSet()
                         _state.value = State.Connected(m.optString("host", host))
                         startPing()
+                        if ("actions" in _caps.value) send(JSONObject().put("t", "actions_get"))   // fresh list per connection
                         val mac = m.optString("mac")
                         val mh = macHandler
                         if (mac.isNotEmpty() && mh != null) scope.launch { mh(mac) }
@@ -158,6 +162,10 @@ class Link(private val scope: CoroutineScope) {
                     "chat_delta", "chat_done", "chat_error", "chat_mood", "tool", "confirm_req", "cu_session" -> {
                         val h = chatHandler
                         if (h != null) scope.launch { h(m) } // hop to main; launches stay in order
+                    }
+                    "actions", "action_result" -> {
+                        val h = actionsHandler
+                        if (h != null) scope.launch { h(m) }
                     }
                     "denied" -> {
                         wantConnected = false
@@ -237,6 +245,11 @@ class Link(private val scope: CoroutineScope) {
     fun chatCancel(id: Int) = send(JSONObject().put("t", "chat_cancel").put("id", id))
     fun chatReset() = send(JSONObject().put("t", "chat_reset"))
     fun cuStop() = send(JSONObject().put("t", "cu_stop"))
+    // ---- Quick actions (PROTOCOL.md) ---------------------------------------
+    fun actionsGet() = send(JSONObject().put("t", "actions_get"))
+    /** True only if the socket accepted it. `confirmed` is required exactly when the item had a confirm text. */
+    fun action(id: String, rid: Int, confirmed: Boolean): Boolean =
+        trySend(JSONObject().put("t", "action").put("id", id).put("rid", rid).apply { if (confirmed) put("confirmed", true) })
     fun guideClear() = send(JSONObject().put("t", "guide_clear"))
     fun confirm(call: String, allow: Boolean) =
         send(JSONObject().put("t", "confirm").put("call", call).put("allow", allow))
