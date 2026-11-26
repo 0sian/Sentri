@@ -26,9 +26,11 @@ QtObject {
         return best
     }
     // x, y are compositor layout px (logical, global); the screen containing them gets the guide
-    function pointTo(x, y, title, body, ttl) {
+    property var guideStep: null       // multi-step guide: { i, n, note }; the notch shows Step i of n and a Next button
+    function pointTo(x, y, title, body, ttl, step) {
         var s = screenAt(x, y)
         if (!s) return
+        guideStep = step ? { i: Number(step.i), n: Number(step.n), note: "" } : null
         if (eyeState === "sleep") setState("idle")
         if (activeSlot && activeSlot !== slots[s.name]) hideSlot(activeSlot)
         activeScreen = s
@@ -44,6 +46,10 @@ QtObject {
     }
     function hideSlot(sl) { sl.callout.shown = false; sl.rope.hide() }
     function clearRope() {
+        if (guideStep) {      // the daemon's step session ends with the guide, however it went away
+            bridge.send_event(JSON.stringify({ event: "guide_end" }))
+            guideStep = null
+        }
         showTimer.stop(); ttlTimer.stop()
         lookActive = false; driveGaze()
         if (activeSlot) hideSlot(activeSlot)
@@ -215,7 +221,9 @@ QtObject {
         function onCommand(cmd, args) {
             if (cmd === "expand") root.expanded = true
             else if (cmd === "collapse") root.expanded = false
-            else if (cmd === "point") root.pointTo(args.x, args.y, args.title, args.text, args.ttl || 0)
+            else if (cmd === "point") root.pointTo(args.x, args.y, args.title, args.text, args.ttl || 0, args.step)
+            else if (cmd === "hold") { showTimer.stop(); ttlTimer.stop(); lookActive = false; if (root.activeSlot) root.hideSlot(root.activeSlot); root.driveGaze() }
+            else if (cmd === "stepinfo") root.guideStep = { i: Number(args.i), n: Number(args.n), note: String(args.note || "") }
             else if (cmd === "clear") root.clearRope()
             else if (cmd === "state") root.setState(String(args.name))
             else if (cmd === "mood") root.setMood(String(args.name))
@@ -295,8 +303,8 @@ QtObject {
                 id: shape
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 0
-                width: root.card || root.peek ? 380 : root.expanded ? 360 : 190
-                height: root.card ? 156 : root.peek ? 62 + 20 * root.peek.rows.length + 12 : root.expanded ? 130 : 46
+                width: root.card || root.peek ? 380 : root.guideStep ? 330 : root.expanded ? 360 : 190
+                height: root.card ? 156 : root.peek ? 62 + 20 * root.peek.rows.length + 12 : root.guideStep ? 86 : root.expanded ? 130 : 46
                 Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                 Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                 onWidthChanged: notchWin.updateMask()
@@ -319,7 +327,23 @@ QtObject {
                 }
                 Text { visible: root.expanded && !root.card && !root.peek; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                        text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }
-                MouseArea { anchors.fill: parent; enabled: !root.card; onClicked: { if (root.peek) root.clearPeek(); else if (root.rope && root.rope.active) root.clearRope(); else root.expanded = !root.expanded } }
+                MouseArea { anchors.fill: parent; enabled: !root.card; onClicked: { if (root.peek) root.clearPeek(); else if (root.guideStep || (root.rope && root.rope.active)) root.clearRope(); else root.expanded = !root.expanded } }
+                Item {   // multi-step guide: Step i of n and a Next / Done button
+                    anchors.fill: parent
+                    visible: root.guideStep !== null && !root.card && !root.peek
+                    opacity: root.guideStep ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 140 } }
+                    Text { x: 22; y: 42; width: parent.width - 150; height: 30; elide: Text.ElideRight; color: "#2b2400"
+                           verticalAlignment: Text.AlignVCenter; wrapMode: Text.Wrap; maximumLineCount: 2
+                           font.pixelSize: root.guideStep && root.guideStep.note !== "" ? 11 : 13; font.bold: !(root.guideStep && root.guideStep.note !== "")
+                           text: root.guideStep ? (root.guideStep.note !== "" ? root.guideStep.note : "Step " + root.guideStep.i + " of " + root.guideStep.n) : "" }
+                    Rectangle {
+                        x: parent.width - 118; y: 42; width: 100; height: 30; radius: 15; color: "#2b2400"
+                        Text { anchors.centerIn: parent; color: "#FFD60A"; font.pixelSize: 14; font.bold: true
+                               text: root.guideStep && root.guideStep.i >= root.guideStep.n ? "Done" : "Next \u203A" }
+                        MouseArea { anchors.fill: parent; onClicked: bridge.send_event(JSON.stringify({ event: "guide_next" })) }
+                    }
+                }
                 Item {   // data peek
                     anchors.fill: parent
                     visible: root.peek !== null && !root.card

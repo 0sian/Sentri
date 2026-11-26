@@ -127,7 +127,11 @@ guess where on it the thing is or what his layout looks like, the lookup works t
 not visible, ask him to bring the right window forward and try again. clear_guide removes it. \
 It asks him first only when something private might be on screen (or you set sensitive=true \
 because his question is about private things: messages, email, banking, passwords, personal \
-photos or files, health); otherwise it just runs. Don't use it to click for him: it only points.
+photos or files, health); otherwise it just runs. Don't use it to click for him: it only points. \
+For a task that takes several clicks across different screens or menus, use guide_steps instead (2 to 6 steps; \
+he taps Next on the notch and each step is found on his screen as it is then). \
+For "remind me in 10 minutes" use timer (seconds); for "tell me when that build/download finishes" find its PID \
+with list_processes and use watch_process.
 - Memory: the "Things Osian has told you" block holds facts he asked you to keep. Use remember \
 only for durable facts or preferences he states, or things he asks you to remember; never \
 trivia, and never passwords, keys or other secrets. When you save something, say so in your \
@@ -406,14 +410,15 @@ class Assistant:
         self._notch_tasks = set()
         if desktop is not None and "point_at_screen" not in tools:
             self.overlay = self.overlay or guide.Overlay()
-            tools["point_at_screen"] = guide.PointAtScreen(
-                self.overlay, desktop, guide.Locator(self.backend, guide.GUIDE_MODEL, self._check_budget, self._add_usage),
-                sensitivity.Policy(cfg.guide_safe_apps, cfg.guide_ask_words))
+            locator = guide.Locator(self.backend, guide.GUIDE_MODEL, self._check_budget, self._add_usage)
+            policy = sensitivity.Policy(cfg.guide_safe_apps, cfg.guide_ask_words)
+            tools["point_at_screen"] = guide.PointAtScreen(self.overlay, desktop, locator, policy)
             tools["clear_guide"] = guide.ClearGuide(self.overlay)
             self.timers = notices.Timers(self._timer_fire, self._timers_sync)
             self.watches = notices.Watches(self._watch_done)
             tools["timer"] = notices.TimerTool(self.timers)
             tools["watch_process"] = notices.WatchProcessTool(self.watches)
+            tools["guide_steps"] = guide.GuideSteps(self.overlay, desktop, locator, policy, ask=self._guide_ask)   # last: tool order is cached
         self.tools = tools
         if self.overlay is not None and "system_doctor" in tools and cfg.doctor_alerts:
             self.doctor_watcher = doctor.Watcher(lambda rows, ttl: self.notch_alert("PC alert", rows, ttl),
@@ -532,7 +537,27 @@ class Assistant:
         if self._card_waiters.pop(call, None) is not None:
             self._fire(self.overlay.send({"cmd": "confirm_clear", "call": call}, spawn=False))
 
+    async def _guide_ask(self, summary: str) -> bool:
+        """A later step of a multi-step guide landed on something private-looking: ask on the notch (no chat turn
+        is running to carry a phone card). False if it can't be offered (e.g. a computer-use session is active),
+        denied, or unanswered for 30 s."""
+        fut = asyncio.get_running_loop().create_future()
+        call = pc_tools.next_call_id()
+        if not self.notch_card(call, "point_at_screen", summary, "low", 30, lambda allow: fut.done() or fut.set_result(allow)):
+            return False
+        try:
+            return await asyncio.wait_for(fut, 30) is True
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self.notch_card_done(call)
+
     def _overlay_event(self, ev: dict):
+        if ev.get("event") in ("guide_next", "guide_end"):       # the notch's Next button, or the guide went away
+            g = self.tools.get("guide_steps")
+            if g is not None:
+                g.on_overlay_event(ev)
+            return
         if ev.get("event") != "confirm" or not isinstance(ev.get("allow"), bool):
             return
         resolve = self._card_waiters.get(ev.get("call"))

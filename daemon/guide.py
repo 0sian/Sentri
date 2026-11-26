@@ -300,9 +300,11 @@ class PointAtScreen(pc_tools.Tool):
             return f"Look at your screen and point out: {what}. Asking first because {clean(a['_ask'], 90)}."
         return f"Point out on your screen: {what}"
 
-    async def run(self, a):
+    async def _point(self, target: str, title: str, text: str, ttl: int, step: dict = None, settle: bool = True) -> bool:
+        """Screenshot the focused monitor, find `target` and draw the rope and card. False if it isn't visible.
+        `step` ({"i","n"}) makes the notch show Step i of n with a Next button (multi-step guides)."""
         t0 = time.monotonic()
-        if self.overlay.guide_may_be_showing():   # an old rope must not be in the shot
+        if settle and self.overlay.guide_may_be_showing():   # an old rope must not be in the shot
             await self.overlay.send({"cmd": "clear"}, spawn=False)
             await asyncio.sleep(HIDE_SETTLE)
             self.overlay.visible_until = 0.0
@@ -310,20 +312,156 @@ class PointAtScreen(pc_tools.Tool):
         jpeg, geom = await self.desktop.screenshot(edge=GUIDE_EDGE)
         t1 = time.monotonic()
         sw, sh = geom.shot_size
-        p = await self.locator.locate(base64.b64encode(jpeg).decode(), sw, sh, a["target"])
+        p = await self.locator.locate(base64.b64encode(jpeg).decode(), sw, sh, target)
         t2 = time.monotonic()
         if p is None:
             log.info("guide: not found (shot %.1fs, locate %.1fs)", t1 - t0, t2 - t1)
+            return False
+        gx, gy = geom.to_layout(*p)   # layout px: the overlay finds the monitor containing the point
+        msg = {"cmd": "point", "x": gx, "y": gy, "title": title, "text": text, "ttl": ttl}
+        if step:
+            msg["step"] = step
+        await self.overlay.send(msg)
+        self.overlay.visible_until = time.monotonic() + ttl + 1
+        log.info("guide: pointed (shot %.1fs, locate %.1fs, draw %.1fs; %d chars of instructions)",
+                 t1 - t0, t2 - t1, time.monotonic() - t2, len(text))
+        return True
+
+    async def run(self, a):
+        if not await self._point(a["target"], a["title"], a["instructions"], GUIDE_TTL):
             return ("Couldn't see that on the focused monitor's screen. Ask Osian to bring the right window "
                     "to the front (or switch monitor) and try again.")
-        gx, gy = geom.to_layout(*p)   # layout px: the overlay finds the monitor containing the point
-        await self.overlay.send({"cmd": "point", "x": gx, "y": gy, "title": a["title"], "text": a["instructions"],
-                                 "ttl": GUIDE_TTL})
-        self.overlay.visible_until = time.monotonic() + GUIDE_TTL + 1
-        log.info("guide: pointed (shot %.1fs, locate %.1fs, draw %.1fs; %d chars of instructions)",
-                 t1 - t0, t2 - t1, time.monotonic() - t2, len(a["instructions"]))
         return ("Pointing at it now; the card shows your instructions. It retracts by itself after about "
                 f"{GUIDE_TTL} seconds, or when he taps the notch.")
+
+
+MAX_STEPS = 6
+STEP_TTL = 120     # a multi-step guide waits this long on each step before retracting
+
+
+class StepSession:
+    """One running multi-step guide: step 1 is shown by the tool; the notch's Next button asks for the rest,
+    each located on a fresh screenshot because the screen has changed by then."""
+
+    def __init__(self, tool: "GuideSteps", steps: list, title: str, sensitive: bool):
+        self.tool, self.steps, self.title, self.sensitive = tool, steps, title, sensitive
+        self.i, self.shown, self.alive = 0, False, True
+        self.lock = asyncio.Lock()
+
+    def _title(self) -> str:
+        return f"Step {self.i + 1} of {len(self.steps)}" + (f": {self.title}" if self.title else "")
+
+    async def show(self) -> bool:
+        st = self.steps[self.i]
+        self.shown = await self.tool._point(st["target"], self._title(), st["instructions"], STEP_TTL,
+                                            {"i": self.i + 1, "n": len(self.steps)}, settle=False)
+        return self.shown
+
+    async def end(self):
+        self.alive = False
+        if self.tool.session is self:
+            self.tool.session = None
+
+    async def next(self):
+        """The Next button: advance (or finish, on the last step; or retry a step that wasn't found)."""
+        if self.lock.locked() or not self.alive:
+            return
+        async with self.lock:
+            ov = self.tool.overlay
+            if self.shown and self.i + 1 >= len(self.steps):
+                await ov.send({"cmd": "clear"}, spawn=False)
+                ov.visible_until = 0.0
+                await self.end()
+                return
+            await ov.send({"cmd": "hold"}, spawn=False)           # hide the rope so it isn't in the screenshot
+            await asyncio.sleep(HIDE_SETTLE)
+            if self.shown:
+                self.i += 1
+            # the screen has changed: check again that it isn't showing something private
+            ask, reasons = self.tool.policy.assess(await self.tool.windows(), self.sensitive, pc_tools.app_name)
+            if ask:
+                what = clean(self.steps[self.i]["target"], 80)
+                ok = self.tool.ask is not None and await self.tool.ask(
+                    f"Look at your screen again for step {self.i + 1}: {what}. Asking first because {clean('; '.join(reasons), 80)}.")
+                if not ok:
+                    await ov.send({"cmd": "clear"}, spawn=False)
+                    ov.visible_until = 0.0
+                    await self.end()
+                    return
+            self.shown = False
+            if not await self.show():
+                n = len(self.steps)
+                await ov.send({"cmd": "stepinfo", "i": self.i + 1, "n": n,
+                               "note": "Can't see it. Switch to the right window, then tap Next"}, spawn=False)
+
+    async def ended_by_overlay(self):
+        await self.end()
+
+
+class GuideSteps(PointAtScreen):
+    name = "guide_steps"
+    description = (
+        "Walk Osian through a task on his screen one step at a time (2 to 6 steps): the rope points at step 1 now, and "
+        "each step has a Next button on the notch; when he taps it, the next target is found on his screen as it is then. "
+        "Use it when a task takes several clicks across different screens or menus; use point_at_screen for a single thing. "
+        "steps: in order, each with target (what to find, at most 12 words, by how it looks and what it says; don't guess "
+        "what later screens will look like beyond naming the control) and instructions (one or two short sentences for the card). "
+        "title: optional. sensitive and the privacy rules are the same as point_at_screen, and they are checked again on "
+        "every step. Only what is visible on the focused monitor can be found.")
+    schema = pc_tools._schema(
+        {"steps": {"type": "array", "items": pc_tools._schema({"target": {"type": "string"}, "instructions": {"type": "string"}},
+                                                               ["target", "instructions"])},
+         "title": {"type": "string"}, "sensitive": {"type": "boolean"}}, ["steps"])
+    fallback_summary = "Walk you through something on your screen"
+
+    def __init__(self, *a, ask=None, **k):
+        super().__init__(*a, **k)
+        self.ask = ask               # async (summary) -> bool: an approval card on the notch for a later step
+        self.session = None
+        self._tasks = set()
+
+    def validate(self, args):
+        steps = args.get("steps")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_STEPS:
+            raise ToolError(f"steps must be a list of 1 to {MAX_STEPS}")
+        clean_steps = []
+        for st in steps:
+            if not isinstance(st, dict):
+                raise ToolError("each step needs a target and instructions")
+            one = super().validate({"target": st.get("target"), "instructions": st.get("instructions")})
+            clean_steps.append({"target": one["target"], "instructions": one["instructions"]})
+        out = super().validate({**clean_steps[0], "title": args.get("title"), "sensitive": args.get("sensitive")})
+        out["steps"] = clean_steps
+        return out
+
+    def summary(self, a):
+        n, first = len(a["steps"]), clean(a["steps"][0]["target"], 70)
+        if a.get("_ask"):
+            return f"Look at your screen and walk you through {n} steps, starting with: {first}. Asking first because {clean(a['_ask'], 90)}."
+        return f"Walk you through {n} steps on your screen, starting with: {first}"
+
+    async def run(self, a):
+        if self.session is not None:
+            await self.session.end()
+        sess = StepSession(self, a["steps"], a["title"], a["sensitive"])
+        if not await sess.show():
+            return ("Couldn't see the first step's target on the focused monitor's screen. Ask Osian to bring the right "
+                    "window to the front (or switch monitor) and try again.")
+        self.session = sess
+        n = len(a["steps"])
+        return (f"Showing step 1 of {n}. Osian taps Next on the notch when he's ready, and the following steps appear "
+                f"on their own (each found on his screen as it is then). Each step stays up to {STEP_TTL // 60} minutes. "
+                "You don't need to do anything more.")
+
+    def on_overlay_event(self, ev: dict):
+        """guide_next / guide_end from the notch."""
+        sess = self.session
+        if sess is None:
+            return
+        coro = sess.next() if ev.get("event") == "guide_next" else sess.ended_by_overlay()
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
 
 class ClearGuide(pc_tools.Tool):

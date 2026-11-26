@@ -145,7 +145,7 @@ async def main():
         cfg = ai.AIConfig(api_key="x")
         a = ai.Assistant(cfg, backend=SimpleNamespace(), usage_file=Path(td) / "u.json", desktop=object(), overlay=Ov())
         check("assistant registers timer and watch_process when there is a desktop", isinstance(a.tools.get("timer"), notices.TimerTool) and "watch_process" in a.tools)
-        check("...after the older tools (the order is part of the cached prompt)", list(a.tools)[-2:] == ["timer", "watch_process"], list(a.tools)[-4:])
+        check("...after the older tools (the order is part of the cached prompt)", list(a.tools)[-3:] == ["timer", "watch_process", "guide_steps"], list(a.tools)[-4:])
         a.timers.path = Path(td) / "t.json"
         a.timers.add(300, "Tea")
         await asyncio.sleep(0.05)
