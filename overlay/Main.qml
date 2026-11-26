@@ -35,6 +35,7 @@ QtObject {
         activeSlot = slots[s.name]
         if (!activeSlot) return
         var lx = x - s.geometry.x, ly = y - s.geometry.y
+        lookX = x; lookY = y; lookActive = true; driveGaze()
         activeSlot.rope.show(lx, ly)
         var c = activeSlot.callout
         c.title = title || ""; c.body = body || ""; c.target = Qt.point(lx, ly); c.place()
@@ -44,6 +45,7 @@ QtObject {
     function hideSlot(sl) { sl.callout.shown = false; sl.rope.hide() }
     function clearRope() {
         showTimer.stop(); ttlTimer.stop()
+        lookActive = false; driveGaze()
         if (activeSlot) hideSlot(activeSlot)
     }
     property var showTimer: Timer { interval: 650
@@ -58,21 +60,71 @@ QtObject {
     property real dizzy: 0
     readonly property real baseLid: ({ idle: 1, thinking: 1, talking: 1, working: 0.62, waiting: 1.12,
                                        error: 0.6, sleep: 0.06 })[eyeState] || 1
-    readonly property real lid: blinking ? 0.06 : baseLid
+    readonly property real lid: blinking ? 0.06 : baseLid * moodLid
     function setState(name) {
         if (name === "wake") { eyeState = "idle"; doubleBlink.restart(); name = "idle" }
         else if (["idle", "thinking", "talking", "working", "waiting", "error", "sleep"].indexOf(name) < 0) return
         else eyeState = name
         gazeStep = 0
         dizzy = 0
+        if (eyeState === "idle") { if (mood !== "neutral") moodTimer.restart() }
+        else if (eyeState !== "talking") { mood = "neutral"; moodTimer.stop() }
         if (eyeState === "error") dizzyTimer.restart(); else dizzyTimer.stop()
         if (eyeState === "idle") sleepTimer.restart(); else sleepTimer.stop()
         driveGaze()
     }
+    // ---- Moods (chat_mood): an expression over the talking/idle eyes, gone a few seconds after the reply ----
+    property string mood: "neutral"
+    readonly property var looks: ({
+        neutral: {}, attentive: { lid: 1.1 }, surprised: { lid: 1.18, pupil: 0.6 }, excited: { lid: 1.12, pupil: 1.2 },
+        happy: { bot: 0.4, lid: 1.12, gx: 0, gy: -0.4 }, laughing: { bot: 0.48, lid: 1.12, shake: true, gx: 0, gy: -0.4 }, angry: { top: 0.42, ang: 20 },
+        sad: { top: 0.36, ang: -18, lid: 0.95, gx: 0, gy: 0.7 }, scared: { lid: 1.15, pupil: 0.55, shake: true },
+        suspicious: { top: 0.42, bot: 0.15, gx: 0.9, gy: 0 }, confused: { lid: 1.08, topR: 0.34, angR: -14 },
+        curious: { lid: 1.1, pupil: 1.1, gx: 0.7, gy: -0.6 }, proud: { top: 0.18, bot: 0.34, lid: 1.05, gy: -0.3, gx: 0 },
+        shy: { lid: 0.88, pupil: 0.9, gx: -0.7, gy: 0.8 }, unimpressed: { top: 0.5, gx: 0, gy: 0 } })
+    readonly property bool moodOn: mood !== "neutral" && (eyeState === "talking" || eyeState === "idle")
+    readonly property var look: moodOn ? (looks[mood] || {}) : ({})
+    function lk(k, d) { return look[k] !== undefined ? look[k] : d }
+    readonly property real moodLid: lk("lid", 1)
+    property var moodTimer: Timer { interval: 7000; onTriggered: { root.mood = "neutral"; root.driveGaze() } }
+    function setMood(name) {
+        if (!looks.hasOwnProperty(name)) return
+        mood = name
+        if (eyeState === "idle") moodTimer.restart(); else moodTimer.stop()
+        driveGaze()
+    }
+
+    // ---- Where the eyes aim: a live guide target > a mood's gaze > the cursor > the state's own pattern ----
+    property bool lookActive: false
+    property real lookX: 0
+    property real lookY: 0
+    property bool cursorFollow: false
+    property real curX: 0
+    property real curY: 0
+    function aim(x, y) {      // x, y in global layout px
+        var s = activeScreen
+        var nx = s.geometry.x + s.geometry.width / 2, ny = s.geometry.y + 24
+        var dx = x - nx, dy = y - ny, m = Math.sqrt(dx * dx + dy * dy)
+        if (m < 1) { gazeX = 0; gazeY = 0; return }
+        var k = Math.min(1, m / 450)
+        gazeX = dx / m * k; gazeY = dy / m * k
+    }
+    property var cursorStill: Timer { interval: 5000; onTriggered: { root.cursorFollow = false; root.driveGaze() } }
+    function cursorAt(x, y) {
+        curX = x; curY = y
+        if (eyeState === "sleep") setState("idle")
+        if (eyeState === "idle") sleepTimer.restart()
+        cursorFollow = true; cursorStill.restart()
+        if (!lookActive && (eyeState === "idle" || eyeState === "talking") && !(moodOn && look.gx !== undefined)) { aim(x, y) }
+    }
+
     property int gazeStep: 0
     // one gaze move per tick, pattern per state
     function driveGaze() {
         var n = gazeStep++
+        if (lookActive && eyeState !== "error" && eyeState !== "sleep") { aim(lookX, lookY); gazeTimer.stop(); return }
+        if (moodOn && look.gx !== undefined) { gazeX = look.gx; gazeY = look.gy; gazeTimer.stop(); return }
+        if (cursorFollow && (eyeState === "idle" || eyeState === "talking")) { aim(curX, curY); gazeTimer.stop(); return }
         switch (eyeState) {
         case "thinking": { var seq = [[-0.9, -1], [0.9, -1], [0.1, -1], [-0.7, -0.6], [0.8, -0.8]]
             var g = seq[Math.floor(Math.random() * seq.length)]; gazeX = g[0]; gazeY = g[1]
@@ -113,6 +165,8 @@ QtObject {
             else if (cmd === "point") root.pointTo(args.x, args.y, args.title, args.text, args.ttl || 0)
             else if (cmd === "clear") root.clearRope()
             else if (cmd === "state") root.setState(String(args.name))
+            else if (cmd === "mood") root.setMood(String(args.name))
+            else if (cmd === "cursor") root.cursorAt(Number(args.x), Number(args.y))
             else if (cmd === "debug") root.debug = !!args.on
             else if (cmd === "quit") bridge.quit()
         }
@@ -197,6 +251,9 @@ QtObject {
                     anchors.horizontalCenter: parent.horizontalCenter
                     y: 14
                     lid: root.lid; gazeX: root.gazeX; gazeY: root.gazeY
+                    pupil: root.lk("pupil", 1); bot: root.lk("bot", 0); shake: root.lk("shake", false)
+                    topL: root.lk("top", 0); topR: root.lk("topR", root.lk("top", 0))
+                    angL: root.lk("ang", 0); angR: root.lk("angR", -root.lk("ang", 0))
                 }
                 Text { visible: root.expanded; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                        text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }

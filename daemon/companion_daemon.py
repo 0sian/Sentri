@@ -440,6 +440,7 @@ class Server:
         log.info("client connected: %s", peer)
         if self.assistant:
             self.assistant.notch("wake", spawn=True)   # starts the notch if it isn't up; eyes blink awake
+            self.assistant.gaze_start()                # eyes follow the cursor while the phone is here
 
         async def send(msg: dict):
             try:
@@ -498,6 +499,7 @@ class Server:
             log.info("client disconnected: %s", peer)
             if self.assistant and self.active is None:
                 self.assistant.notch("idle")
+                self.assistant.gaze_stop()
 
     async def _apply_input(self, queue: asyncio.Queue):
         while True:

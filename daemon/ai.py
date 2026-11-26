@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cu
+import gaze
 import guide
 import memory
 import pc_tools
@@ -374,6 +375,7 @@ class Assistant:
                 cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
         self.overlay = overlay
         self._notch_last = None
+        self._gaze_task = None
         self._notch_tasks = set()
         if desktop is not None and "point_at_screen" not in tools:
             self.overlay = self.overlay or guide.Overlay()
@@ -408,13 +410,34 @@ class Assistant:
         self._notch_tasks.add(task)
         task.add_done_callback(self._notch_tasks.discard)
 
-    async def _notch_send(self, name: str, spawn: bool):
+    def notch_mood(self, mood: str):
+        """The model's chat_mood, as an expression on the notch's eyes."""
+        if self.overlay is None or mood not in MOODS:
+            return
+        task = asyncio.ensure_future(self._notch_send("mood", False, mood))
+        self._notch_tasks.add(task)
+        task.add_done_callback(self._notch_tasks.discard)
+
+    async def _notch_send(self, cmd: str, spawn: bool, name: str = None):
         try:
-            await self.overlay.send({"cmd": "state", "name": name}, spawn=spawn)
+            await self.overlay.send({"cmd": "state", "name": cmd} if name is None
+                                    else {"cmd": cmd, "name": name}, spawn=spawn)
         except Exception:
-            log.debug("notch state %s not delivered", name)
+            log.debug("notch %s not delivered", name or cmd)
+
+    def gaze_start(self):
+        """Eyes follow the cursor while a phone is connected (idempotent)."""
+        if self.overlay is not None and (self._gaze_task is None or self._gaze_task.done()):
+            self._gaze_task = asyncio.ensure_future(
+                gaze.watch(lambda m: self.overlay.send(m, spawn=False), self.overlay._alive))
+
+    def gaze_stop(self):
+        if self._gaze_task is not None:
+            self._gaze_task.cancel()
+            self._gaze_task = None
 
     async def close(self):
+        self.gaze_stop()
         if self.overlay is not None:
             await self.overlay.stop()
 
@@ -659,7 +682,7 @@ class ChatSession:
             usage = await self.assistant.turn(
                 text, lambda s: self._delta(tid, s),
                 lambda ev: self._tool(tid, ev),
-                lambda m: self.send({"t": "chat_mood", "id": tid, "mood": m}),
+                lambda m: self._mood(tid, m),
                 lambda *a: self._confirm(tid, *a))
             self.assistant.notch("idle")
             await self.send({"t": "chat_done", "id": tid, "usage": usage, **self.assistant.spend()})
@@ -673,6 +696,10 @@ class ChatSession:
             log.exception("chat turn failed")
             self.assistant.notch("error")
             await self.send({"t": "chat_error", "id": tid, "msg": "Something went wrong on the PC."})
+
+    async def _mood(self, tid: int, mood: str):
+        self.assistant.notch_mood(mood)
+        await self.send({"t": "chat_mood", "id": tid, "mood": mood})
 
     async def _delta(self, tid: int, text: str):
         self.assistant.notch("talking")

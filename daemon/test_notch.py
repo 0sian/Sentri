@@ -4,6 +4,7 @@ import asyncio
 import sys
 
 import ai
+import gaze
 
 failures = []
 
@@ -19,7 +20,7 @@ class RecOverlay:
         self.rows = []
 
     async def send(self, msg, spawn=True):
-        self.rows.append((msg.get("name"), spawn))
+        self.rows.append((msg.get("name") if msg["cmd"] == "state" else msg["cmd"] + ":" + msg["name"], spawn))
         return True
 
 
@@ -32,6 +33,7 @@ class StubAssistant:
     """Just what ChatSession touches; turn() plays a scripted sequence of callbacks."""
     notch = ai.Assistant.notch
     _notch_send = ai.Assistant._notch_send
+    notch_mood = ai.Assistant.notch_mood
 
     def __init__(self, overlay, script):
         self.overlay, self.script = overlay, script
@@ -116,6 +118,38 @@ async def main():
     a = StubAssistant(RecOverlay(), plain)
     a.notch("wake", spawn=True); a.notch("wake", spawn=True); await settle()
     check("wake always sent (spawns the overlay)", a.overlay.rows == [("wake", True), ("wake", True)], a.overlay.rows)
+
+    # moods
+    ov = RecOverlay()
+    sent = []
+
+    async def keep(m): sent.append(m)
+    cs = ai.ChatSession(StubAssistant(ov, plain), keep)
+    await cs._mood(1, "happy"); await cs._mood(1, "bogus"); await settle()
+    check("mood goes to the notch and the phone", ov.rows == [("mood:happy", False)] and [m["mood"] for m in sent] == ["happy", "bogus"], (ov.rows, sent))
+
+    # cursor watcher
+    pts = iter([(1, 1), (1, 1), (5, 5), (5, 5), (9, 9)])
+    got, alive = [], [True]
+
+    async def src():
+        try:
+            return next(pts)
+        except StopIteration:
+            return (9, 9)
+
+    async def snd(m): got.append((m["x"], m["y"]))
+    gaze.FAST = gaze.SLOW = 0.001
+    t = asyncio.ensure_future(gaze.watch(snd, lambda: alive[0], src))
+    await asyncio.sleep(0.2)
+    check("cursor: only changes are sent", got == [(1, 1), (5, 5), (9, 9)], got)
+    alive[0] = False
+    await asyncio.sleep(0.05)
+    n = len(got)
+    alive[0] = True
+    await asyncio.sleep(1.3)    # the loop idles for a second while the overlay is down
+    check("cursor: nothing sent while the overlay is down, resumes after", len(got) == n + 1 and got[-1] == (9, 9), got)
+    t.cancel()
 
     if failures:
         print(f"{len(failures)} FAILED: {failures}"); sys.exit(1)
