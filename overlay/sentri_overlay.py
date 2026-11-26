@@ -25,6 +25,10 @@ class Bridge(QObject):
     def __init__(self):
         super().__init__()
         self.server = QLocalServer(self)
+
+    def start(self):
+        """Listen only once the QML is loaded: a command that arrived earlier would be acknowledged
+        and then dropped (nothing is connected to the signal yet)."""
         QLocalServer.removeServer(str(SOCK))
         self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         if not self.server.listen(str(SOCK)):
@@ -68,9 +72,13 @@ def main():
     engine.warnings.connect(lambda ws: [print('qml:', w.toString(), file=sys.stderr) for w in ws])
     bridge = Bridge()
     engine.rootContext().setContextProperty("bridge", bridge)
+    # real QScreen objects: QML's Qt.application.screens are QQuickScreenInfo wrappers that can't be
+    # assigned to Window.screen or the layer-shell screen property
+    engine.rootContext().setContextProperty("screenList", app.screens())
     engine.load(QUrl.fromLocalFile(str(HERE / "Main.qml")))
     if not engine.rootObjects():
         return 1
+    bridge.start()
     return app.exec()
 
 

@@ -200,3 +200,22 @@ behaviour the spec leaves open. None of them adds a message or field:
      and another approval" as an error.
    - Audited like every tool, with signal and result.
    - No stop/disable-service tool.
+15. **Screen guide** (`daemon/guide.py`, `overlay/`). No new wire messages are needed: it runs as two
+   ordinary tools through the existing `tool` / `confirm_req` flow.
+   - `point_at_screen(target, instructions, title?)` is low risk, so it gets a card every time
+     ("Look at your screen and point out: <target>"), because the focused monitor's screenshot goes
+     to the AI provider. The daemon hides any old guide, takes the screenshot at up to 2560 px, and a
+     separate one-shot Haiku call returns `{found, x, y}`. Those numbers are range-checked, and nothing
+     from the screen goes back to the chat model. The tool result is "Pointing at it now…" or a "not
+     visible, ask him to bring the right window forward" error. A rope then swings out from the notch
+     to the target, with the instructions on a card beside it.
+   - `clear_guide()` is auto tier and removes the guide. Tapping the notch on the PC does the same.
+     A guide also clears itself after 120 s.
+   - The overlay is a separate process (system Python + PyQt6 + layer-shell-qt). The daemon starts it
+     on first use, with the live session's environment, and stops it on shutdown. Commands go over
+     `$XDG_RUNTIME_DIR/sentri-overlay.sock` as JSON lines: `point {x,y,title,text,ttl}` (x,y are
+     compositor layout px, and the monitor that contains the point gets the guide), `clear`, `expand`,
+     `collapse`, `debug {on}`, `quit`.
+   - **Proposed, optional:** phone → daemon `{"t":"guide_clear"}` dismisses the guide (no reply). The
+     daemon already handles it; old and new apps can ignore it.
+   - Tested on Hyprland, including a second monitor at scale 1.5 (virtual output). Not yet tested on KDE.

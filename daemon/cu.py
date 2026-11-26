@@ -150,7 +150,7 @@ class HyprDesktop:
         except ValueError:
             raise ToolError("hyprctl returned something unexpected")
 
-    async def screenshot(self, zoom_region=None, geom: Geometry = None):
+    async def screenshot(self, zoom_region=None, geom: Geometry = None, edge: int = SHOT_EDGE):
         """(jpeg bytes, Geometry). With zoom_region (screenshot px x0,y0,x1,y1 of geom), a
         close-up of that region at up to SHOT_EDGE px, for reading small text."""
         pc_tools.desktop_env()  # at the login screen: "no desktop session yet", before anything else
@@ -159,7 +159,7 @@ class HyprDesktop:
             if mon is None:
                 raise ToolError("no focused monitor")
             geom = Geometry(mon["x"], mon["y"], float(mon.get("scale") or 1.0), mon["width"], mon["height"],
-                            shot_scale_for(mon["width"], mon["height"]))
+                            shot_scale_for(mon["width"], mon["height"], edge))
             data = await pc_tools.run_bytes("grim", "-c", "-o", mon["name"], "-t", "jpeg", "-q", "80",
                                             "-s", f"{geom.shot_scale:.4f}", "-", env=pc_tools.desktop_env())
             return data, geom
@@ -267,7 +267,7 @@ class KDEDesktop(HyprDesktop):
             return "power menu"
         return self.LAUNCHERS.get(cls)
 
-    async def screenshot(self, zoom_region=None, geom: Geometry = None):
+    async def screenshot(self, zoom_region=None, geom: Geometry = None, edge: int = SHOT_EDGE):
         import kwin
         env = pc_tools.desktop_env()
         tmp = Path(tempfile.mkdtemp(prefix="companion-cu-", dir=env.get("XDG_RUNTIME_DIR")))
@@ -286,7 +286,7 @@ class KDEDesktop(HyprDesktop):
                            mons[0] if len(mons) == 1 else None)
                 if mon is None or abs(iw / ih - mon["w"] / mon["h"]) > 0.02:
                     raise ToolError("couldn't tell which monitor the screenshot shows")
-                geom = Geometry(mon["x"], mon["y"], iw / mon["w"], iw, ih, shot_scale_for(iw, ih))
+                geom = Geometry(mon["x"], mon["y"], iw / mon["w"], iw, ih, shot_scale_for(iw, ih, edge))
                 sw, sh = geom.shot_size
                 await pc_tools.run_bytes("magick", str(png), "-resize", f"{sw}x{sh}!", "-quality", "80", str(out), env=env)
                 return out.read_bytes(), geom

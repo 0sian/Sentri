@@ -49,6 +49,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import cu
+import guide
 import memory
 import pc_tools
 
@@ -110,6 +111,13 @@ any step needs it). You can't change their steps.
 for something like that, say plainly that you can't click, and call start_computer_use with a \
 short, specific goal; the card asks him. Never quietly do the nearest thing instead (such as \
 searching when he asked you to click something).
+- Showing him around: when he asks how to do something on screen or where something is, call \
+point_at_screen. A rope swings out from the notch at the top of his screen to the thing and a \
+card shows your short instructions beside it, so write them for that card. For target, say what \
+he's after in his own terms plus how it looks or what it says; you can't see his screen, so never \
+guess where on it the thing is or what his layout looks like, the lookup works that out. It only sees the focused monitor, so if it comes back \
+not visible, ask him to bring the right window forward and try again. clear_guide removes it. \
+Don't use it to click for him: it only points.
 - Memory: the "Things Osian has told you" block holds facts he asked you to keep. Use remember \
 only for durable facts or preferences he states, or things he asks you to remember; never \
 trivia, and never passwords, keys or other secrets. When you save something, say so in your \
@@ -333,7 +341,7 @@ class Assistant:
     """The conversation, shared by whichever phone is connected. One turn at a time."""
 
     def __init__(self, cfg: AIConfig, backend=None, usage_file: Path = USAGE_FILE, tools=None, injector=None,
-                 store: memory.MemoryStore = None, desktop=None, audit=None):
+                 store: memory.MemoryStore = None, desktop=None, audit=None, overlay=None):
         self.cfg = cfg
         self.backend = backend or AnthropicBackend(cfg)
         self.usage_file = usage_file
@@ -351,6 +359,12 @@ class Assistant:
         if cfg.cu and desktop is not None:
             tools["start_computer_use"] = cu.StartComputerUse(
                 cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
+        self.overlay = overlay
+        if desktop is not None and "point_at_screen" not in tools:
+            self.overlay = self.overlay or guide.Overlay()
+            tools["point_at_screen"] = guide.PointAtScreen(
+                self.overlay, desktop, guide.Locator(self.backend, guide.GUIDE_MODEL, self._check_budget, self._add_usage))
+            tools["clear_guide"] = guide.ClearGuide(self.overlay)
         self.tools = tools
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
         strict = [d["name"] for d in self.tool_defs if d.get("strict")]
@@ -367,6 +381,10 @@ class Assistant:
         self.history = []
         self.busy = False
         self._snapshot_memory()
+
+    async def close(self):
+        if self.overlay is not None:
+            await self.overlay.stop()
 
     def _snapshot_memory(self):
         """The memory block is fixed for a conversation: changing the system prompt mid-way would

@@ -461,6 +461,9 @@ class Server:
                     elif m["t"] == "cu_stop":
                         if self.assistant:
                             self.assistant.cu.stop("user")  # no session: ignored
+                    elif m["t"] == "guide_clear":   # proposed, optional: dismiss the on-screen guide
+                        if self.assistant and self.assistant.overlay is not None:
+                            await self.assistant.overlay.send({"cmd": "clear"}, spawn=False)
                     elif m["t"] in CHAT_TYPES:
                         # chat runs in its own task; handle() only starts or cancels it
                         if chat:
@@ -568,6 +571,8 @@ async def amain(args):
         log.info("shutting down")
     finally:
         watcher.cancel()
+        if assistant:
+            await assistant.close()   # stops the guide overlay
         vin.close()
 
 
