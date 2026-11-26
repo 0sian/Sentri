@@ -12,8 +12,8 @@ android {
         applicationId = "uk.osianj.companion"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "1.1.0"
+        versionCode = 23
+        versionName = "1.2.0"
     }
 
     // If app/debug.keystore exists, every build is signed with that same key, so a new APK installs over the

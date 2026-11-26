@@ -49,6 +49,9 @@ class Link(private val scope: CoroutineScope) {
     /** Called on the main thread, in order, for `actions` / `action_result` (Quick actions). */
     var actionsHandler: ((JSONObject) -> Unit)? = null
 
+    /** Called on the main thread, in order, for `audit` / `memory` / `memory_result` / `routines` (Activity screen). */
+    var libraryHandler: ((JSONObject) -> Unit)? = null
+
     /** Called on the main thread when the daemon's `ok` includes the PC's MAC address (for Wake-on-LAN). */
     var macHandler: ((String) -> Unit)? = null
 
@@ -167,6 +170,10 @@ class Link(private val scope: CoroutineScope) {
                         val h = actionsHandler
                         if (h != null) scope.launch { h(m) }
                     }
+                    "audit", "memory", "memory_result", "routines" -> {
+                        val h = libraryHandler
+                        if (h != null) scope.launch { h(m) }
+                    }
                     "denied" -> {
                         wantConnected = false
                         _state.value = State.Failed("Wrong token", false)
@@ -250,6 +257,15 @@ class Link(private val scope: CoroutineScope) {
     /** True only if the socket accepted it. `confirmed` is required exactly when the item had a confirm text. */
     fun action(id: String, rid: Int, confirmed: Boolean): Boolean =
         trySend(JSONObject().put("t", "action").put("id", id).put("rid", rid).apply { if (confirmed) put("confirmed", true) })
+    // ---- Activity, memory, routines (PROTOCOL.md) ----------------------------
+    fun auditGet(n: Int = 100) = send(JSONObject().put("t", "audit_get").put("n", n))
+    fun memoryGet() = send(JSONObject().put("t", "memory_get"))
+    fun routinesGet() = send(JSONObject().put("t", "routines_get"))
+    /** True only if the socket accepted it. */
+    fun memoryAdd(text: String, rid: Int) = trySend(JSONObject().put("t", "memory_add").put("text", text).put("rid", rid))
+    fun memoryEdit(id: String, text: String, rid: Int) =
+        trySend(JSONObject().put("t", "memory_edit").put("id", id).put("text", text).put("rid", rid))
+    fun memoryForget(id: String, rid: Int) = trySend(JSONObject().put("t", "memory_forget").put("id", id).put("rid", rid))
     fun guideClear() = send(JSONObject().put("t", "guide_clear"))
     fun confirm(call: String, allow: Boolean) =
         send(JSONObject().put("t", "confirm").put("call", call).put("allow", allow))

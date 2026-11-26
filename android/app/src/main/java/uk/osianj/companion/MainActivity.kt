@@ -50,6 +50,7 @@ enum class Screen(val title: String) {
     Companion("Sentri"),
     Controller("Controller"),
     Actions("Quick actions"),
+    Activity("Activity"),
     Settings("Settings"),
 }
 
@@ -116,6 +117,7 @@ fun App(vm: CompanionViewModel) {
                 Screen.Companion -> CompanionScreen(vm)
                 Screen.Controller -> ControlScreen(vm)
                 Screen.Actions -> ActionsScreen(vm)
+                Screen.Activity -> ActivityScreen(vm)
                 Screen.Settings -> SettingsScreen(vm) { screen = Screen.Companion }
             }
         }

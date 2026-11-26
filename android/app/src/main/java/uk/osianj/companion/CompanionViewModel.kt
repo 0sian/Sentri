@@ -129,7 +129,37 @@ class CompanionViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    // ---- Activity: audit log, memory, routines ---------------------------
+    var library by mutableStateOf(LibraryState())
+        private set
+
+    fun refreshLog() { link.auditGet(100) }
+    fun refreshMemory() { link.memoryGet() }
+    fun refreshRoutines() { link.routinesGet() }
+
+    /** Add (id == null) or edit one memory, or forget it (text == null). The PC answers with memory_result. */
+    fun changeMemory(id: String?, text: String?) {
+        if (library.memRunning) return
+        val (next, rid) = library.startMemory()
+        val sent = when {
+            id == null && text != null -> link.memoryAdd(text, rid)
+            id != null && text != null -> link.memoryEdit(id, text, rid)
+            id != null -> link.memoryForget(id, rid)
+            else -> return
+        }
+        if (!sent) {
+            library = library.copy(memNote = "Not connected", memNoteOk = false, memNoteSeq = library.memNoteSeq + 1)
+            return
+        }
+        library = next
+        viewModelScope.launch {
+            delay(10_000)
+            library = library.memoryTimedOut(rid)
+        }
+    }
+
     init {
+        link.libraryHandler = { m -> library = library.onServer(m) }
         link.actionsHandler = { m -> actions = actions.onServer(m) }
         link.chatHandler = { m ->
             if (m.optString("t") == "cu_session") {
@@ -162,6 +192,7 @@ class CompanionViewModel(app: Application) : AndroidViewModel(app) {
                 if (st !is Link.State.Connected) {
                     chat = chat.disconnected()
                     actions = actions.disconnected()
+                    library = library.disconnected()
                     endGuide()
                     if (cu != null) { cu = null; cuNote = "Computer use ended: connection lost" }
                 }
