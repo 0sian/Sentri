@@ -18,6 +18,7 @@ Item {
     property real springK: 110
     property real springC: 15       // zeta ~0.7: ~5% overshoot, rope body supplies the wobble
     property bool settled: false
+    property bool retracting: false
     property int frames: 0
 
     property var px: []; property var py: []; property var ox: []; property var oy: []
@@ -33,8 +34,9 @@ Item {
         for (var i = 0; i < n; i++) { px.push(anchor.x); py.push(anchor.y); ox.push(anchor.x); oy.push(anchor.y) }
         ex = anchor.x; ey = anchor.y; evx = 0; evy = 0; restLen = 1; retract = 0; settled = false
     }
-    function show(x, y) { target = Qt.point(x, y); if (!active) { reset(); active = true } settled = false }
-    function hide() { active = false }
+    function show(x, y) { hideTimer.stop(); retracting = false; target = Qt.point(x, y); if (!active) { reset(); active = true } settled = false }
+    function hide() { if (!active || retracting) return; retracting = true; target = anchor; hideTimer.restart() }
+    Timer { id: hideTimer; interval: 650; onTriggered: { rope.active = false; rope.retracting = false } }
     Component.onCompleted: reset()
 
     function step(dt) {
@@ -44,7 +46,7 @@ Item {
         evy += ((target.y - ey) * springK - evy * springC) * dt
         ex += evx * dt; ey += evy * dt
         var d = Math.hypot(ex - anchor.x, ey - anchor.y)
-        var want = Math.max(d * slack + 30, 60) / (n - 1)
+        var want = (retracting ? Math.max(d, 6) : Math.max(d * slack + 30, 60)) / (n - 1)
         restLen = want > restLen ? want : restLen + (want - restLen) * Math.min(1, dt * 8)  // pay out instantly, reel in smoothly
         px[0] = anchor.x; py[0] = anchor.y
         px[n - 1] = ex; py[n - 1] = ey

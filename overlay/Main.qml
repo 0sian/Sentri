@@ -110,11 +110,12 @@ QtObject {
             visible: modelData === root.activeScreen
             color: "transparent"
             flags: Qt.FramelessWindowHint
-            width: root.expanded ? 360 : 190
-            height: root.expanded ? 130 : 46
-            Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-            Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-            onHeightChanged: root.notchHeight = height
+            // Fixed size: resizing a layer-shell window every frame shows stale buffers. The shape
+            // animates inside it and the input region is clipped to the shape.
+            width: 360
+            height: 130
+            function updateMask() { bridge.setMask(notchWin, shape.x, 0, shape.width, shape.height) }
+            onVisibleChanged: if (visible) Qt.callLater(updateMask)
             LS.Window.scope: "sentri-notch"
             LS.Window.screen: modelData
             LS.Window.exclusionZone: -1
@@ -123,7 +124,15 @@ QtObject {
             LS.Window.keyboardInteractivity: LS.Window.KeyboardInteractivityNone
 
             Rectangle {   // flat yellow body, flush with the top edge
-                anchors.fill: parent
+                id: shape
+                anchors.horizontalCenter: parent.horizontalCenter
+                y: 0
+                width: root.expanded ? 360 : 190
+                height: root.expanded ? 130 : 46
+                Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+                onWidthChanged: notchWin.updateMask()
+                onHeightChanged: { root.notchHeight = height; notchWin.updateMask() }
                 color: "#FFD60A"
                 radius: 23
                 Rectangle { x: 0; y: 0; width: parent.width; height: parent.radius; color: parent.color }

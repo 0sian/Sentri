@@ -113,8 +113,8 @@ short, specific goal; the card asks him. Never quietly do the nearest thing inst
 searching when he asked you to click something).
 - Showing him around: when he asks how to do something on screen or where something is, call \
 point_at_screen. A rope swings out from the notch at the top of his screen to the thing and a \
-card shows your short instructions beside it, so write them for that card. For target, say what \
-he's after in his own terms plus how it looks or what it says; you can't see his screen, so never \
+card shows your short instructions beside it, so write them for that card. For target, say in at most \
+12 words what he's after in his own terms plus how it looks or what it says; you can't see his screen, so never \
 guess where on it the thing is or what his layout looks like, the lookup works that out. It only sees the focused monitor, so if it comes back \
 not visible, ask him to bring the right window forward and try again. clear_guide removes it. \
 Don't use it to click for him: it only points.

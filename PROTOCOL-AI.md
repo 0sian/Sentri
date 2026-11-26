@@ -210,7 +210,7 @@ behaviour the spec leaves open. None of them adds a message or field:
      visible, ask him to bring the right window forward" error. A rope then swings out from the notch
      to the target, with the instructions on a card beside it.
    - `clear_guide()` is auto tier and removes the guide. Tapping the notch on the PC does the same.
-     A guide also clears itself after 120 s.
+     A guide also retracts by itself after 30 s.
    - The overlay is a separate process (system Python + PyQt6 + layer-shell-qt). The daemon starts it
      on first use, with the live session's environment, and stops it on shutdown. Commands go over
      `$XDG_RUNTIME_DIR/sentri-overlay.sock` as JSON lines: `point {x,y,title,text,ttl}` (x,y are

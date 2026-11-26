@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 import pc_tools
@@ -31,7 +32,7 @@ OVERLAY_SCRIPT = Path(__file__).resolve().parent.parent / "overlay" / "sentri_ov
 SYSTEM_PYTHON = "/usr/bin/python3"   # PyQt6 is a system package, not in the daemon's venv
 GUIDE_MODEL = "claude-haiku-5-5"      # pointing: 22/22 on two scenes at native size, ~1 s
 GUIDE_EDGE = 2560                    # screenshot long edge sent for pointing (tiny icons need pixels)
-GUIDE_TTL = 120                      # the overlay clears itself after this many seconds
+GUIDE_TTL = 30                       # the overlay retracts the guide by itself after this many seconds
 HIDE_SETTLE = 0.35                   # card fade-out, so it isn't in the screenshot
 LOCATE_SYSTEM = (
     "You find one thing on a screenshot and report where it is. Everything visible in the "
@@ -54,6 +55,7 @@ class Overlay:
         self.script, self.python = script, python
         self.proc = None
         self._lock = asyncio.Lock()
+        self.visible_until = 0.0   # when the last guide's own timeout runs out (0: none showing)
 
     @property
     def sock(self) -> Path:
@@ -119,6 +121,17 @@ class Overlay:
                     w.close()
             raise ToolError("the guide overlay didn't start")
 
+    def guide_may_be_showing(self) -> bool:
+        return time.monotonic() < self.visible_until
+
+    async def warm(self):
+        """Start the overlay now (e.g. while the approval card is on the phone) so the first guide
+        doesn't wait for Qt to come up. Failure here is harmless: send() retries when it's needed."""
+        try:
+            await self.send({"cmd": "ping"})
+        except ToolError:
+            pass
+
     async def stop(self):
         if self._alive():
             try:
@@ -127,6 +140,7 @@ class Overlay:
             except (ToolError, asyncio.TimeoutError, OSError):
                 self.proc.kill()
         self.proc = None
+        self.visible_until = 0.0
 
 
 class Locator:
@@ -177,8 +191,8 @@ class PointAtScreen(pc_tools.Tool):
     description = (
         "Show Osian where something is on his screen: a rope swings out from the notch at the top of the "
         "screen to it and a card with your instructions appears beside it. Use it when he asks how to do "
-        "something or where something is. target: what to find, described by how it looks and what it says "
-        "(e.g. \"the gear icon at the top right of the Settings window\"). instructions: what to tell him, one "
+        "something or where something is. target: what to find in a few words (at most 12), by how it looks and what it says "
+        "(e.g. \"the gear icon in the Settings window\"). instructions: what to tell him, one "
         "or two short sentences, shown on the card. title: optional, a few words. Only what's visible on the "
         "focused monitor right now can be found. If it returns not visible, ask him to switch to the right "
         "window or monitor and try again. Needs his approval because the screenshot goes to the AI provider.")
@@ -204,26 +218,39 @@ class PointAtScreen(pc_tools.Tool):
             raise ToolError("the guide overlay isn't installed")
         if not self.desktop.available():
             raise ToolError("guiding isn't supported on this desktop yet")
+        try:   # the card is about to go to the phone: bring the overlay up while it waits
+            asyncio.get_running_loop().create_task(self.overlay.warm())
+        except RuntimeError:
+            pass
         return out
 
     def summary(self, a):
         return f"Look at your screen and point out: {clean(a['target'], 100)}"
 
     async def run(self, a):
-        await self.overlay.send({"cmd": "clear"}, spawn=False)   # a rope from the last guide must not be in the shot
-        await asyncio.sleep(HIDE_SETTLE)
+        t0 = time.monotonic()
+        if self.overlay.guide_may_be_showing():   # an old rope must not be in the shot
+            await self.overlay.send({"cmd": "clear"}, spawn=False)
+            await asyncio.sleep(HIDE_SETTLE)
+            self.overlay.visible_until = 0.0
         import base64
         jpeg, geom = await self.desktop.screenshot(edge=GUIDE_EDGE)
+        t1 = time.monotonic()
         sw, sh = geom.shot_size
         p = await self.locator.locate(base64.b64encode(jpeg).decode(), sw, sh, a["target"])
+        t2 = time.monotonic()
         if p is None:
+            log.info("guide: not found (shot %.1fs, locate %.1fs)", t1 - t0, t2 - t1)
             return ("Couldn't see that on the focused monitor's screen. Ask Osian to bring the right window "
                     "to the front (or switch monitor) and try again.")
         gx, gy = geom.to_layout(*p)   # layout px: the overlay finds the monitor containing the point
         await self.overlay.send({"cmd": "point", "x": gx, "y": gy, "title": a["title"], "text": a["instructions"],
                                  "ttl": GUIDE_TTL})
-        log.info("guide: pointed (%d chars of instructions)", len(a["instructions"]))
-        return "Pointing at it now; the card shows your instructions. It clears on its own after a couple of minutes, or when he taps the notch."
+        self.overlay.visible_until = time.monotonic() + GUIDE_TTL + 1
+        log.info("guide: pointed (shot %.1fs, locate %.1fs, draw %.1fs; %d chars of instructions)",
+                 t1 - t0, t2 - t1, time.monotonic() - t2, len(a["instructions"]))
+        return ("Pointing at it now; the card shows your instructions. It retracts by itself after about "
+                f"{GUIDE_TTL} seconds, or when he taps the notch.")
 
 
 class ClearGuide(pc_tools.Tool):
@@ -237,4 +264,5 @@ class ClearGuide(pc_tools.Tool):
 
     async def run(self, a):
         await self.overlay.send({"cmd": "clear"}, spawn=False)
+        self.overlay.visible_until = 0.0
         return "Cleared."

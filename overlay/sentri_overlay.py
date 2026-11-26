@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QUrl, pyqtSignal, pyqtSlot, QTimer
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtGui import QGuiApplication, QRegion
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtQml import QQmlApplicationEngine
 
@@ -54,6 +54,12 @@ class Bridge(QObject):
                 continue
             self.command.emit(cmd, m)
             c.write(b'{"ok":true}\n')
+
+    @pyqtSlot(QObject, int, int, int, int)
+    def setMask(self, win, x, y, w, h):
+        """Limit a window's input region to a rectangle (Qt sends it to the compositor), so the
+        transparent rest of a fixed-size window lets clicks through."""
+        win.setMask(QRegion(x, y, w, h))
 
     @pyqtSlot(result=str)
     def socketPath(self):

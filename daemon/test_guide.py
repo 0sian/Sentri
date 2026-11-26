@@ -53,7 +53,8 @@ class FakeOverlay(guide.Overlay):
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
 
     def sent(self):
-        return [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
+        rows = [json.loads(l) for l in self.log.read_text().splitlines()] if self.log.exists() else []
+        return [m for m in rows if m.get("cmd") != "ping"]   # warm-up pings aren't interesting
 
 
 class FakeDesktop:
@@ -140,21 +141,27 @@ async def main():
         desk.on_shot = lambda: None
         out = await tool.run(args)
         sent = ov.sent()[before:]
-        check("hides the overlay before the screenshot, then points",
-              [m["cmd"] for m in sent] == ["clear", "point"], str(sent))
+        check("nothing showing: no clear/settle delay, just points", [m["cmd"] for m in sent] == ["point"], str(sent))
+        check("visibility window recorded after pointing", ov.guide_may_be_showing())
         # shot px (960,540) on a 1920x1080 shot of a 1.5x monitor at x=2560 -> layout (2560+640, 360)
-        check("coordinates map to layout px", abs(sent[1]["x"] - 3200) < 1 and abs(sent[1]["y"] - 360) < 1, str(sent[1]))
-        check("point carries the card text and a ttl", sent[1]["text"] == "Click the gear." and sent[1]["title"] == "Step 1"
-              and sent[1]["ttl"] == guide.GUIDE_TTL)
+        check("coordinates map to layout px", abs(sent[0]["x"] - 3200) < 1 and abs(sent[0]["y"] - 360) < 1, str(sent[0]))
+        check("point carries the card text and a ttl", sent[0]["text"] == "Click the gear." and sent[0]["title"] == "Step 1"
+              and sent[0]["ttl"] == guide.GUIDE_TTL)
         check("screenshot taken near native size", desk.edges == [guide.GUIDE_EDGE])
         check("locator gets the shot size and the target", loc.calls == [(1920, 1080, "the gear icon")], str(loc.calls))
         check("result to the model has no screen content", "Pointing" in out)
+
+        # a guide is still up: it is hidden (and the fade waited out) before the next screenshot
+        before = len(ov.sent())
+        await tool.run(args)
+        check("guide showing: clear first, then point", [m["cmd"] for m in ov.sent()[before:]] == ["clear", "point"],
+              str(ov.sent()[before:]))
 
         # not visible -> tells the model to ask the user, draws nothing
         before = len(ov.sent())
         tool2 = guide.PointAtScreen(ov, desk, FakeLocator(None))
         out = await tool2.run(args)
-        check("not visible: only a clear is sent", [m["cmd"] for m in ov.sent()[before:]] == ["clear"])
+        check("not visible: a clear (the old guide was up) and no point", [m["cmd"] for m in ov.sent()[before:]] == ["clear"])
         check("not visible: model told to ask for the right window", "right window" in out)
 
         # --- validation ---
@@ -202,8 +209,17 @@ async def main():
         # --- clear_guide ---
         before = len(ov.sent())
         out = await guide.ClearGuide(ov).run({})
+        check("clear_guide resets the visibility window", not ov.guide_may_be_showing())
         check("clear_guide sends clear", ov.sent()[before:] == [{"cmd": "clear"}] and out == "Cleared.")
         check("clear_guide needs no card and no desktop", guide.ClearGuide(ov).risk is None and guide.ClearGuide(ov).needs_desktop is False)
+
+        # validate warms the overlay up while the approval card is out
+        ov2 = FakeOverlay(Path(tempfile.mkdtemp(dir=td)))
+        t3 = guide.PointAtScreen(ov2, desk, FakeLocator(None))
+        t3.validate({"target": "x", "instructions": "y"})
+        await asyncio.sleep(1.0)
+        check("validate starts the overlay in the background", ov2.proc is not None and ov2.proc.returncode is None)
+        await ov2.stop()
 
         await ov.stop()
         check("stop shuts the overlay down", ov.proc is None)
