@@ -51,6 +51,7 @@ from pathlib import Path
 import cu
 import gaze
 import guide
+import homelab_watch
 import memory
 import pc_tools
 import sensitivity
@@ -159,6 +160,8 @@ class AIConfig:
     guide_ask_words: list = dataclasses.field(default_factory=list)  # extra title words that make a window private-looking
     routines: dict = dataclasses.field(default_factory=dict)  # raw tables; validated in pc_tools.load_routines
     homelab: pc_tools.Glances = None
+    homelab_alerts: bool = True          # [homelab] alerts = false turns the notch alerts off
+    homelab_alert_interval: int = 300    # [homelab] alert_interval, seconds (60 or more)
     cu: "cu.CUConfig" = None  # computer-use sessions; None = off
 
 
@@ -235,6 +238,11 @@ def load_config(path: Path = AI_CONFIG):
         api = str(h.get("api", "/api/4"))
         if u.scheme in ("http", "https") and u.hostname and re.fullmatch(r"/api/\d", api):
             cfg.homelab = pc_tools.Glances(str(h["url"]), api, str(h.get("user", "")), str(h.get("password", "")))
+            if isinstance(h.get("alerts"), bool):
+                cfg.homelab_alerts = h["alerts"]
+            iv = h.get("alert_interval")
+            if isinstance(iv, int) and not isinstance(iv, bool) and iv >= 60:
+                cfg.homelab_alert_interval = iv
         else:
             log.error("ai.toml: ignoring [homelab]: needs url = \"http://host:61208\" and api = \"/api/4\" or \"/api/3\"")
     return cfg
@@ -378,6 +386,8 @@ class Assistant:
         self._notch_last = None
         self._gaze_task = self._listen_task = None
         self._card_waiters = {}
+        self.homelab_watcher = None
+        self._watch_task = None
         self._notch_tasks = set()
         if desktop is not None and "point_at_screen" not in tools:
             self.overlay = self.overlay or guide.Overlay()
@@ -388,6 +398,10 @@ class Assistant:
         self.tools = tools
         if self.overlay is not None and isinstance(tools.get("homelab_stats"), pc_tools.HomelabStats):
             tools["homelab_stats"].peek = self.notch_peek
+            if cfg.homelab_alerts:
+                self.homelab_watcher = homelab_watch.Watcher(
+                    lambda sec, _t=tools["homelab_stats"]: _t._fetch(sec, "docker" if sec == "containers" else None),
+                    self._homelab_alert, lambda: self.busy, cfg.homelab_alert_interval)
         self.tool_defs = [t.definition() for t in self.tools.values()]  # fixed order: part of the cached prefix
         strict = [d["name"] for d in self.tool_defs if d.get("strict")]
         if len(strict) > pc_tools.MAX_STRICT:  # the API would reject every request: drop strict from the tail
@@ -435,12 +449,18 @@ class Assistant:
             self._gaze_task = asyncio.ensure_future(
                 gaze.watch(lambda m: self.overlay.send(m, spawn=False), self.overlay._alive))
             self._listen_task = asyncio.ensure_future(self.overlay.listen(self._overlay_event))
+        if self.homelab_watcher is not None and (self._watch_task is None or self._watch_task.done()):
+            self._watch_task = asyncio.ensure_future(self.homelab_watcher.run())
+
+    def _homelab_alert(self, rows: list, ttl: int):
+        self.notch_peek("homelab alert", rows, ttl)
+        self.notch_mood("surprised")
 
     def gaze_stop(self):
-        for t in (self._gaze_task, self._listen_task):
+        for t in (self._gaze_task, self._listen_task, self._watch_task):
             if t is not None:
                 t.cancel()
-        self._gaze_task = self._listen_task = None
+        self._gaze_task = self._listen_task = self._watch_task = None
 
     # ---- Approving on the notch ----
     # A card can be answered at the PC for tools in PC_APPROVE only, and never while a computer-use
