@@ -29,6 +29,7 @@ QtObject {
     function pointTo(x, y, title, body, ttl) {
         var s = screenAt(x, y)
         if (!s) return
+        if (eyeState === "sleep") setState("idle")
         if (activeSlot && activeSlot !== slots[s.name]) hideSlot(activeSlot)
         activeScreen = s
         activeSlot = slots[s.name]
@@ -49,6 +50,61 @@ QtObject {
         onTriggered: if (root.activeSlot && root.activeSlot.callout.body !== "") root.activeSlot.callout.shown = true }
     property var ttlTimer: Timer { onTriggered: root.clearRope() }
 
+    // ---- Eyes: state from the daemon (state command), gaze from state or (later) the cursor ----
+    property string eyeState: "idle"
+    property real gazeX: 0
+    property real gazeY: 0
+    property bool blinking: false
+    property real dizzy: 0
+    readonly property real baseLid: ({ idle: 1, thinking: 1, talking: 1, working: 0.62, waiting: 1.12,
+                                       error: 0.6, sleep: 0.06 })[eyeState] || 1
+    readonly property real lid: blinking ? 0.06 : baseLid
+    function setState(name) {
+        if (name === "wake") { eyeState = "idle"; doubleBlink.restart(); name = "idle" }
+        else if (["idle", "thinking", "talking", "working", "waiting", "error", "sleep"].indexOf(name) < 0) return
+        else eyeState = name
+        gazeStep = 0
+        dizzy = 0
+        if (eyeState === "error") dizzyTimer.restart(); else dizzyTimer.stop()
+        if (eyeState === "idle") sleepTimer.restart(); else sleepTimer.stop()
+        driveGaze()
+    }
+    property int gazeStep: 0
+    // one gaze move per tick, pattern per state
+    function driveGaze() {
+        var n = gazeStep++
+        switch (eyeState) {
+        case "thinking": { var seq = [[-0.9, -1], [0.9, -1], [0.1, -1], [-0.7, -0.6], [0.8, -0.8]]
+            var g = seq[Math.floor(Math.random() * seq.length)]; gazeX = g[0]; gazeY = g[1]
+            gazeTimer.interval = 450 + Math.random() * 500; gazeTimer.restart(); break }
+        case "working": gazeX = (n % 2) ? 0.9 : -0.9; gazeY = 0.55; gazeTimer.interval = 800; gazeTimer.restart(); break
+        case "waiting": gazeX = 0; gazeY = (n % 2) ? 0.9 : -0.2; gazeTimer.interval = 900; gazeTimer.restart(); break
+        case "talking": gazeX = 0; gazeY = 0.1; gazeTimer.stop(); break
+        case "error": gazeTimer.stop(); break      // dizzyTimer drives it
+        case "sleep": gazeX = 0; gazeY = 0.6; gazeTimer.stop(); break
+        default:       // idle: mostly forward, a glance now and then
+            if (n % 2 === 0) { gazeX = 0; gazeY = 0 }
+            else { gazeX = (Math.random() < 0.5 ? -1 : 1) * (0.5 + Math.random() * 0.5); gazeY = (Math.random() - 0.5) * 0.8 }
+            gazeTimer.interval = n % 2 ? 900 + Math.random() * 600 : 3000 + Math.random() * 5000
+            gazeTimer.restart()
+        }
+    }
+    property var gazeTimer: Timer { onTriggered: root.driveGaze() }
+    property var blinkTimer: Timer {
+        running: root.eyeState !== "sleep"; repeat: true; interval: 3000
+        onTriggered: { root.blinking = true; blinkOpen.start(); interval = 2200 + Math.random() * 4300 }
+    }
+    property var blinkOpen: Timer { interval: 130; onTriggered: root.blinking = false }
+    property var doubleBlink: Timer { interval: 220; repeat: true; property int n: 0
+        onRunningChanged: if (running) n = 0
+        onTriggered: { n++; root.blinking = (n % 2 === 1); if (n >= 4) { root.blinking = false; stop() } } }
+    property var dizzyTimer: Timer { interval: 60; repeat: true; property int ticks: 0
+        onRunningChanged: if (running) ticks = 0
+        onTriggered: { ticks++; var a = ticks * 0.55; root.gazeX = Math.cos(a) * 0.9; root.gazeY = Math.sin(a) * 0.9
+                       if (ticks > 24) { stop(); root.setState("idle") } } }
+    property var sleepTimer: Timer { interval: 180000; onTriggered: root.setState("sleep") }
+    Component.onCompleted: driveGaze()
+
     property var conn: Connections {
         target: bridge
         function onCommand(cmd, args) {
@@ -56,6 +112,7 @@ QtObject {
             else if (cmd === "collapse") root.expanded = false
             else if (cmd === "point") root.pointTo(args.x, args.y, args.title, args.text, args.ttl || 0)
             else if (cmd === "clear") root.clearRope()
+            else if (cmd === "state") root.setState(String(args.name))
             else if (cmd === "debug") root.debug = !!args.on
             else if (cmd === "quit") bridge.quit()
         }
@@ -136,12 +193,10 @@ QtObject {
                 color: "#FFD60A"
                 radius: 23
                 Rectangle { x: 0; y: 0; width: parent.width; height: parent.radius; color: parent.color }
-                Row {
+                Eyes {
                     anchors.horizontalCenter: parent.horizontalCenter
-                    y: 14; spacing: 22
-                    Repeater { model: 2
-                        Rectangle { width: 12; height: 20; radius: 6; color: "white"
-                                    border.color: "#2b2400"; border.width: 1.5 } }
+                    y: 14
+                    lid: root.lid; gazeX: root.gazeX; gazeY: root.gazeY
                 }
                 Text { visible: root.expanded; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                        text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }

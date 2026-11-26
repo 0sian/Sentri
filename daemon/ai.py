@@ -373,6 +373,8 @@ class Assistant:
             tools["start_computer_use"] = cu.StartComputerUse(
                 cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
         self.overlay = overlay
+        self._notch_last = None
+        self._notch_tasks = set()
         if desktop is not None and "point_at_screen" not in tools:
             self.overlay = self.overlay or guide.Overlay()
             tools["point_at_screen"] = guide.PointAtScreen(
@@ -395,6 +397,22 @@ class Assistant:
         self.history = []
         self.busy = False
         self._snapshot_memory()
+
+    def notch(self, name: str, spawn: bool = False):
+        """Tell the notch what Sentri is doing (eyes: thinking, talking, working, waiting, error,
+        idle, wake). Fire and forget: the notch is decoration and must never slow or fail a turn."""
+        if self.overlay is None or (name == self._notch_last and name != "wake"):
+            return
+        self._notch_last = name
+        task = asyncio.ensure_future(self._notch_send(name, spawn))
+        self._notch_tasks.add(task)
+        task.add_done_callback(self._notch_tasks.discard)
+
+    async def _notch_send(self, name: str, spawn: bool):
+        try:
+            await self.overlay.send({"cmd": "state", "name": name}, spawn=spawn)
+        except Exception:
+            log.debug("notch state %s not delivered", name)
 
     async def close(self):
         if self.overlay is not None:
@@ -622,6 +640,7 @@ class ChatSession:
                 await self.send({"t": "chat_error", "id": tid, "msg": "Busy"})
             else:
                 self.turn_id = tid
+                self.assistant.notch("thinking")
                 self.task = asyncio.create_task(self._run(tid, text))
                 self.task.add_done_callback(lambda task: self._finished(task, tid))
         elif t == "chat_cancel":
@@ -638,18 +657,31 @@ class ChatSession:
     async def _run(self, tid: int, text: str):
         try:
             usage = await self.assistant.turn(
-                text, lambda s: self.send({"t": "chat_delta", "id": tid, "text": s}),
-                lambda ev: self.send({"t": "tool", "id": tid, **ev}),
+                text, lambda s: self._delta(tid, s),
+                lambda ev: self._tool(tid, ev),
                 lambda m: self.send({"t": "chat_mood", "id": tid, "mood": m}),
                 lambda *a: self._confirm(tid, *a))
+            self.assistant.notch("idle")
             await self.send({"t": "chat_done", "id": tid, "usage": usage, **self.assistant.spend()})
         except ChatError as ex:
+            self.assistant.notch("error")
             await self.send({"t": "chat_error", "id": tid, "msg": str(ex)})
         except asyncio.CancelledError:
+            self.assistant.notch("idle")
             await self.send({"t": "chat_done", "id": tid, "cancelled": True, **self.assistant.spend()})
         except Exception:
             log.exception("chat turn failed")
+            self.assistant.notch("error")
             await self.send({"t": "chat_error", "id": tid, "msg": "Something went wrong on the PC."})
+
+    async def _delta(self, tid: int, text: str):
+        self.assistant.notch("talking")
+        await self.send({"t": "chat_delta", "id": tid, "text": text})
+
+    async def _tool(self, tid: int, ev: dict):
+        # running: busy at it; anything else (ok/error/denied) means the model is thinking again
+        self.assistant.notch("working" if ev.get("state") == "running" else "thinking")
+        await self.send({"t": "tool", "id": tid, **ev})
 
     async def _confirm(self, tid: int, call: str, name: str, summary: str, risk: str):
         """Ask the phone; (True, None) only on an explicit Allow. Timeout -> deny. If the turn is
@@ -659,6 +691,7 @@ class ChatSession:
         fut = asyncio.get_running_loop().create_future()
         self.pending[call] = fut
         try:
+            self.assistant.notch("waiting")
             await self.send({"t": "confirm_req", "id": tid, "call": call, "name": name,
                              "summary": summary, "risk": risk, "timeout": timeout})
             try:
