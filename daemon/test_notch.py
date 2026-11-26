@@ -3,8 +3,14 @@
 import asyncio
 import sys
 
+import json
+import tempfile
+from pathlib import Path
+import types
+
 import ai
 import gaze
+import guide
 
 failures = []
 
@@ -17,10 +23,11 @@ def check(name, cond, detail=""):
 
 class RecOverlay:
     def __init__(self):
-        self.rows = []
+        self.rows, self.msgs = [], []
 
     async def send(self, msg, spawn=True):
-        self.rows.append((msg.get("name") if msg["cmd"] == "state" else msg["cmd"] + ":" + msg["name"], spawn))
+        self.msgs.append(msg)
+        self.rows.append((msg.get("name") if msg["cmd"] == "state" else msg["cmd"] + ":" + str(msg.get("name", msg.get("call"))), spawn))
         return True
 
 
@@ -34,13 +41,18 @@ class StubAssistant:
     notch = ai.Assistant.notch
     _notch_send = ai.Assistant._notch_send
     notch_mood = ai.Assistant.notch_mood
+    notch_card = ai.Assistant.notch_card
+    notch_card_done = ai.Assistant.notch_card_done
+    _overlay_event = ai.Assistant._overlay_event
+    _fire = ai.Assistant._fire
 
     def __init__(self, overlay, script):
         self.overlay, self.script = overlay, script
         self._notch_last, self._notch_tasks = None, set()
         self.busy = False
         self.cfg = ai.AIConfig(api_key="x")
-        self.cu = type("C", (), {"send": None})()
+        self.cu = types.SimpleNamespace(send=None, active=False)
+        self._card_waiters = {}
 
     def claim(self):
         self.busy = True
@@ -118,6 +130,83 @@ async def main():
     a = StubAssistant(RecOverlay(), plain)
     a.notch("wake", spawn=True); a.notch("wake", spawn=True); await settle()
     check("wake always sent (spawns the overlay)", a.overlay.rows == [("wake", True), ("wake", True)], a.overlay.rows)
+
+    # --- PC-side approval ---
+    async def card_case(name, risk, answer, cu_active=False):
+        """Run a turn that asks one confirm; answer(assistant, session) plays the user. Returns
+        (allowed, overlay msgs)."""
+        ov = RecOverlay()
+        holder = {}
+
+        async def script(text, tool, confirm):
+            holder["r"] = asyncio.ensure_future(confirm("c1", name, "Open https://example.com", risk))
+            await asyncio.sleep(0.05)
+            await answer(holder["a"], holder["cs"])
+            holder["res"] = await holder["r"]
+
+        a = StubAssistant(ov, script)
+        a.cu.active = cu_active
+        holder["a"] = a
+        async def keep(m): pass
+        cs = ai.ChatSession(a, keep)
+        holder["cs"] = cs
+        await cs.handle({"t": "chat", "id": 1, "text": "hi"}); await cs.task; await settle()
+        return holder["res"], ov.msgs
+
+    async def click(allow):
+        async def f(a, cs): a._overlay_event({"event": "confirm", "call": "c1", "allow": allow})
+        return f
+    async def phone(allow):
+        async def f(a, cs): cs.pending["c1"].set_result(allow)
+        return f
+    kinds = lambda msgs: [m["cmd"] for m in msgs if m["cmd"].startswith("confirm")]
+
+    res, msgs = await card_case("open_url", "low", await click(True))
+    check("notch Allow resolves the card", res == (True, None) and kinds(msgs) == ["confirm", "confirm_clear"], (res, kinds(msgs)))
+    res, msgs = await card_case("open_url", "low", await click(False))
+    check("notch Deny denies", res == (False, "user"), res)
+    res, msgs = await card_case("open_url", "low", await phone(True))
+    check("phone answering first clears the notch card", res == (True, None) and kinds(msgs) == ["confirm", "confirm_clear"], (res, kinds(msgs)))
+    res, msgs = await card_case("screenshot", "high", await phone(True))
+    check("high-risk / unlisted tools are phone-only (no notch card)", kinds(msgs) == [], kinds(msgs))
+    res, msgs = await card_case("type_text", "low", await phone(False))
+    check("low-risk but not on the PC list: phone-only", kinds(msgs) == [], kinds(msgs))
+    res, msgs = await card_case("open_url", "low", await phone(True), cu_active=True)
+    check("no notch card during a computer-use session", kinds(msgs) == [], kinds(msgs))
+
+    async def bad_events(a, cs):
+        for ev in ({"event": "confirm", "call": "c1", "allow": "yes"}, {"event": "confirm", "call": "c1", "allow": 1},
+                   {"event": "confirm", "call": "zzz", "allow": True}, {"event": "other"}, {}):
+            a._overlay_event(ev)
+        cs.pending["c1"].set_result(False)
+    res, _ = await card_case("open_url", "low", bad_events)
+    check("junk or non-boolean overlay events are ignored", res == (False, "user"), res)
+
+    async def late_cu(a, cs):
+        a.cu.active = True          # a session started while the card was up: a notch click no longer counts
+        a._overlay_event({"event": "confirm", "call": "c1", "allow": True})
+        cs.pending["c1"].set_result(False)
+    res, _ = await card_case("open_url", "low", late_cu)
+    check("a notch click is ignored once a computer-use session is active", res == (False, "user"), res)
+
+    # overlay -> daemon event channel (real Overlay.listen against a tiny unix server)
+    with tempfile.TemporaryDirectory() as td:
+        sock = Path(td) / "o.sock"
+        seen = []
+
+        async def handle(r, w):
+            await r.readline()
+            w.write(b'{"ok":true}\n'); await w.drain()
+            w.write(b'garbage\n{"event":"confirm","call":"c7","allow":true}\n'); await w.drain()
+            await asyncio.sleep(0.3)
+            w.close()
+        srv = await asyncio.start_unix_server(handle, str(sock))
+        ov = guide.Overlay(sock=sock)
+        ov.proc = types.SimpleNamespace(returncode=None)
+        t = asyncio.ensure_future(ov.listen(seen.append))
+        await asyncio.sleep(0.3)
+        t.cancel(); srv.close()
+        check("Overlay.listen delivers events and skips junk lines", seen == [{"event": "confirm", "call": "c7", "allow": True}], seen)
 
     # moods
     ov = RecOverlay()

@@ -25,6 +25,7 @@ class Bridge(QObject):
     def __init__(self):
         super().__init__()
         self.server = QLocalServer(self)
+        self.subscribers = []      # connections that sent {"cmd":"subscribe"}: they get events back
 
     def start(self):
         """Listen only once the QML is loaded: a command that arrived earlier would be acknowledged
@@ -52,8 +53,20 @@ class Bridge(QObject):
             except Exception:
                 c.write(b'{"ok":false,"err":"bad json"}\n')
                 continue
-            self.command.emit(cmd, m)
+            if cmd == "subscribe":     # the daemon keeps this connection open to hear button presses
+                if c not in self.subscribers:
+                    self.subscribers.append(c)
+                    c.disconnected.connect(lambda c=c: self.subscribers.remove(c) if c in self.subscribers else None)
+            else:
+                self.command.emit(cmd, m)
             c.write(b'{"ok":true}\n')
+
+    @pyqtSlot(str)
+    def send_event(self, line: str):
+        """An event for the daemon (e.g. a notch button press): one JSON line to each subscriber."""
+        for c in list(self.subscribers):
+            c.write(line.encode() + b"\n")
+            c.flush()
 
     @pyqtSlot(QObject, int, int, int, int)
     def setMask(self, win, x, y, w, h):

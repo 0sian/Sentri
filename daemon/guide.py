@@ -125,6 +125,36 @@ class Overlay:
     def guide_may_be_showing(self) -> bool:
         return time.monotonic() < self.visible_until
 
+    async def listen(self, handler):
+        """Hear what the overlay reports (notch button presses): keeps a subscribed connection open,
+        reconnecting whenever the overlay (re)starts. handler(dict) gets each event. Never starts the
+        overlay. Runs until cancelled."""
+        while True:
+            if not self._alive():
+                await asyncio.sleep(1.0)
+                continue
+            w = None
+            try:
+                r, w = await self._connect()
+                w.write(b'{"cmd":"subscribe"}\n')
+                await w.drain()
+                await asyncio.wait_for(r.readline(), 3.0)       # the ack
+                while line := await r.readline():
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(ev, dict):
+                        res = handler(ev)
+                        if asyncio.iscoroutine(res):
+                            await res
+            except (OSError, asyncio.TimeoutError):
+                pass
+            finally:
+                if w is not None:
+                    w.close()
+            await asyncio.sleep(1.0)
+
     async def warm(self):
         """Start the overlay now (e.g. while the approval card is on the phone) so the first guide
         doesn't wait for Qt to come up. Failure here is harmless: send() retries when it's needed."""

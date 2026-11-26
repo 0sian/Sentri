@@ -62,6 +62,7 @@ AI_CONFIG = CONFIG_DIR / "ai.toml"
 USAGE_FILE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "companion" / "ai-usage.json"
 
 MAX_CHAT_CHARS = 4000
+PC_APPROVE = ("point_at_screen", "open_url", "close_window")   # low-risk cards also answerable on the notch
 MAX_TOOL_ROUNDS = 8
 # Moods the model may pick (PROTOCOL-AI chat_mood). thinking/alert/sleepy exist on the phone
 # too, but the phone drives those from state.
@@ -375,7 +376,8 @@ class Assistant:
                 cfg.cu, self.cu, self.backend, desktop, self._check_budget, self._add_usage, tools.get("open_url"))
         self.overlay = overlay
         self._notch_last = None
-        self._gaze_task = None
+        self._gaze_task = self._listen_task = None
+        self._card_waiters = {}
         self._notch_tasks = set()
         if desktop is not None and "point_at_screen" not in tools:
             self.overlay = self.overlay or guide.Overlay()
@@ -426,15 +428,51 @@ class Assistant:
             log.debug("notch %s not delivered", name or cmd)
 
     def gaze_start(self):
-        """Eyes follow the cursor while a phone is connected (idempotent)."""
+        """While a phone is connected: eyes follow the cursor and notch button presses are heard (idempotent)."""
         if self.overlay is not None and (self._gaze_task is None or self._gaze_task.done()):
             self._gaze_task = asyncio.ensure_future(
                 gaze.watch(lambda m: self.overlay.send(m, spawn=False), self.overlay._alive))
+            self._listen_task = asyncio.ensure_future(self.overlay.listen(self._overlay_event))
 
     def gaze_stop(self):
-        if self._gaze_task is not None:
-            self._gaze_task.cancel()
-            self._gaze_task = None
+        for t in (self._gaze_task, self._listen_task):
+            if t is not None:
+                t.cancel()
+        self._gaze_task = self._listen_task = None
+
+    # ---- Approving on the notch ----
+    # A card can be answered at the PC for tools in PC_APPROVE only, and never while a computer-use
+    # session runs: that session moves the real mouse, so a model-driven (or screen-text-driven) click
+    # could otherwise press Allow on its own request. Everything else is phone-only.
+    def notch_card(self, call: str, name: str, summary: str, risk: str, timeout, resolve) -> bool:
+        """Offer the card on the notch too. resolve(bool) answers it. Returns whether it was offered."""
+        if (self.overlay is None or risk != "low" or name not in PC_APPROVE or self.cu.active):
+            return False
+        self._card_waiters[call] = resolve
+        self._fire(self.overlay.send({"cmd": "confirm", "call": call, "summary": summary, "timeout": timeout},
+                                     spawn=False))
+        return True
+
+    def notch_card_done(self, call: str):
+        if self._card_waiters.pop(call, None) is not None:
+            self._fire(self.overlay.send({"cmd": "confirm_clear", "call": call}, spawn=False))
+
+    def _overlay_event(self, ev: dict):
+        if ev.get("event") != "confirm" or not isinstance(ev.get("allow"), bool):
+            return
+        resolve = self._card_waiters.get(ev.get("call"))
+        if resolve is not None and not self.cu.active:
+            resolve(ev["allow"])
+
+    def _fire(self, coro):
+        async def quiet():
+            try:
+                await coro
+            except Exception:
+                log.debug("overlay message not delivered")
+        task = asyncio.ensure_future(quiet())
+        self._notch_tasks.add(task)
+        task.add_done_callback(self._notch_tasks.discard)
 
     async def close(self):
         self.gaze_stop()
@@ -719,6 +757,8 @@ class ChatSession:
         self.pending[call] = fut
         try:
             self.assistant.notch("waiting")
+            self.assistant.notch_card(
+                call, name, summary, risk, timeout, lambda allow: fut.done() or fut.set_result(allow))
             await self.send({"t": "confirm_req", "id": tid, "call": call, "name": name,
                              "summary": summary, "risk": risk, "timeout": timeout})
             try:
@@ -731,6 +771,7 @@ class ChatSession:
             raise
         finally:
             self.pending.pop(call, None)
+            self.assistant.notch_card_done(call)
 
     def _finished(self, task: asyncio.Task, tid: int):
         # A task cancelled before its first step never enters _run's try, so neither

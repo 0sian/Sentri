@@ -229,3 +229,11 @@ behaviour the spec leaves open. None of them adds a message or field:
    - **Proposed, optional:** phone → daemon `{"t":"guide_clear"}` dismisses the guide (no reply). The
      daemon already handles it; old and new apps can ignore it.
    - Tested on Hyprland, including a second monitor at scale 1.5 (virtual output). Not yet tested on KDE.
+
+16. **Approving on the notch (PC side only, no wire change).** While a phone is connected, a `confirm_req`
+    for a low-risk tool in `ai.PC_APPROVE` (`point_at_screen`, `open_url`, `close_window`) is also shown
+    as a card on the PC's notch with Allow / Deny. The first answer wins; the daemon then sends the usual
+    `tool` event (running / denied), so the phone resolves its card exactly as before, and the notch card
+    is dismissed if the phone answered first. Never offered for high-risk tools, keystroke tools, or while
+    a computer-use session is active (it moves the real mouse and could press Allow itself), and a notch
+    click that arrives once a session has started is ignored. Card text is the daemon-built `summary`.

@@ -111,7 +111,7 @@ QtObject {
     }
     property var cursorStill: Timer { interval: 5000; onTriggered: { root.cursorFollow = false; root.driveGaze() } }
     function cursorAt(x, y) {
-        curX = x; curY = y
+        curX = x; curY = y; haveCursor = true
         if (eyeState === "sleep") setState("idle")
         if (eyeState === "idle") sleepTimer.restart()
         cursorFollow = true; cursorStill.restart()
@@ -157,6 +157,25 @@ QtObject {
     property var sleepTimer: Timer { interval: 180000; onTriggered: root.setState("sleep") }
     Component.onCompleted: driveGaze()
 
+    // ---- Approval card in the notch: one pending confirm at a time (the daemon decides whether to offer it) ----
+    property var card: null            // { call, summary, timeout }
+    property bool haveCursor: false
+    function showCard(args) {
+        if (haveCursor) { var s = screenAt(curX, curY); if (s) activeScreen = s }   // where he's looking
+        card = { call: String(args.call), summary: String(args.summary || ""), timeout: Number(args.timeout) || 60 }
+        cardTimer.interval = (card.timeout + 3) * 1000; cardTimer.restart()
+        cardAnim.duration = card.timeout * 1000; cardAnim.restart()
+    }
+    property real cardLeft: 0
+    property var cardAnim: NumberAnimation { target: root; property: "cardLeft"; from: 1; to: 0 }
+    function clearCard(call) { if (card && (call === undefined || card.call === call)) { card = null; cardTimer.stop(); cardAnim.stop() } }
+    function answer(allow) {
+        if (!card) return
+        bridge.send_event(JSON.stringify({ event: "confirm", call: card.call, allow: allow }))
+        clearCard()
+    }
+    property var cardTimer: Timer { onTriggered: root.card = null }
+
     property var conn: Connections {
         target: bridge
         function onCommand(cmd, args) {
@@ -167,6 +186,8 @@ QtObject {
             else if (cmd === "state") root.setState(String(args.name))
             else if (cmd === "mood") root.setMood(String(args.name))
             else if (cmd === "cursor") root.cursorAt(Number(args.x), Number(args.y))
+            else if (cmd === "confirm") root.showCard(args)
+            else if (cmd === "confirm_clear") root.clearCard(String(args.call))
             else if (cmd === "debug") root.debug = !!args.on
             else if (cmd === "quit") bridge.quit()
         }
@@ -223,8 +244,8 @@ QtObject {
             flags: Qt.FramelessWindowHint
             // Fixed size: resizing a layer-shell window every frame shows stale buffers. The shape
             // animates inside it and the input region is clipped to the shape.
-            width: 360
-            height: 130
+            width: 400
+            height: 190
             function updateMask() { bridge.setMask(notchWin, shape.x, 0, shape.width, shape.height) }
             onVisibleChanged: if (visible) Qt.callLater(updateMask)
             LS.Window.scope: "sentri-notch"
@@ -238,8 +259,8 @@ QtObject {
                 id: shape
                 anchors.horizontalCenter: parent.horizontalCenter
                 y: 0
-                width: root.expanded ? 360 : 190
-                height: root.expanded ? 130 : 46
+                width: root.card ? 380 : root.expanded ? 360 : 190
+                height: root.card ? 156 : root.expanded ? 130 : 46
                 Behavior on width { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                 Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
                 onWidthChanged: notchWin.updateMask()
@@ -255,9 +276,33 @@ QtObject {
                     topL: root.lk("top", 0); topR: root.lk("topR", root.lk("top", 0))
                     angL: root.lk("ang", 0); angR: root.lk("angR", -root.lk("ang", 0))
                 }
-                Text { visible: root.expanded; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
+                Text { visible: root.expanded && !root.card; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                        text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }
-                MouseArea { anchors.fill: parent; onClicked: { if (root.rope && root.rope.active) root.clearRope(); else root.expanded = !root.expanded } }
+                MouseArea { anchors.fill: parent; enabled: !root.card; onClicked: { if (root.rope && root.rope.active) root.clearRope(); else root.expanded = !root.expanded } }
+                Item {   // approval card
+                    id: cardBox
+                    anchors.fill: parent
+                    visible: root.card !== null
+                    opacity: root.card ? 1 : 0
+                    Behavior on opacity { NumberAnimation { duration: 140 } }
+                    Text { x: 20; y: 46; width: parent.width - 40; height: 58; elide: Text.ElideRight
+                           wrapMode: Text.Wrap; maximumLineCount: 3; textFormat: Text.PlainText
+                           horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                           text: root.card ? root.card.summary : ""; color: "#2b2400"; font.pixelSize: 14 }
+                    Row {
+                        y: 110; anchors.horizontalCenter: parent.horizontalCenter; spacing: 14
+                        Rectangle { width: 150; height: 34; radius: 17; color: "transparent"; border.color: "#2b2400"; border.width: 2
+                            Text { anchors.centerIn: parent; text: "Deny"; color: "#2b2400"; font.pixelSize: 15; font.bold: true }
+                            MouseArea { anchors.fill: parent; onClicked: root.answer(false) } }
+                        Rectangle { width: 150; height: 34; radius: 17; color: "#2b2400"
+                            Text { anchors.centerIn: parent; text: "Allow"; color: "#FFD60A"; font.pixelSize: 15; font.bold: true }
+                            MouseArea { anchors.fill: parent; onClicked: root.answer(true) } }
+                    }
+                    Rectangle {   // time left
+                        x: 30; y: parent.height - 7; height: 3; radius: 1.5; color: "#2b2400"; opacity: 0.45
+                        width: 320 * root.cardLeft
+                    }
+                }
             }
         }
     }
