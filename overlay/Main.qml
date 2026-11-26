@@ -9,15 +9,26 @@ QtObject {
     property bool expanded: false
 
     property var rope: null     // the Rope on the primary screen
-    function pointTo(x, y) { if (rope) rope.show(x, y) }
-    function clearRope() { if (rope) rope.hide() }
+    property var callout: null
+    function pointTo(x, y, title, body) {
+        if (!rope) return
+        rope.show(x, y)
+        if (callout) { callout.title = title || ""; callout.body = body || ""; callout.target = Qt.point(x, y)
+                       callout.place(); showTimer.restart() }
+    }
+    function clearRope() {
+        showTimer.stop()
+        if (callout) callout.shown = false
+        if (rope) rope.hide()
+    }
+    property var showTimer: Timer { interval: 650; onTriggered: if (root.callout && root.callout.body !== "") root.callout.shown = true }
 
     property var conn: Connections {
         target: bridge
         function onCommand(cmd, args) {
             if (cmd === "expand") root.expanded = true
             else if (cmd === "collapse") root.expanded = false
-            else if (cmd === "point") root.pointTo(args.x, args.y)
+            else if (cmd === "point") root.pointTo(args.x, args.y, args.title, args.text)
             else if (cmd === "clear") root.clearRope()
             else if (cmd === "debug") root.debug = !!args.on
             else if (cmd === "quit") bridge.quit()
@@ -44,6 +55,12 @@ QtObject {
                 visible: modelData === Qt.application.screens[0]
                 anchor: Qt.point(width / 2, notchWin.height - 8)
                 Component.onCompleted: if (visible) root.rope = this
+            }
+            Callout {
+                visible: modelData === Qt.application.screens[0] && opacity > 0
+                anchor: Qt.point(parent.width / 2, notchWin.height - 8)
+                keepOut: Qt.rect(parent.width / 2 - 260, 0, 520, notchWin.height + 14)
+                Component.onCompleted: if (modelData === Qt.application.screens[0]) root.callout = this
             }
             Rectangle {   // debug frame: proves the surface covers the screen
                 anchors.fill: parent
@@ -87,7 +104,7 @@ QtObject {
             }
             Text { visible: root.expanded; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                    text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }
-            MouseArea { anchors.fill: parent; onClicked: root.expanded = !root.expanded }
+            MouseArea { anchors.fill: parent; onClicked: { if (root.rope && root.rope.active) root.clearRope(); else root.expanded = !root.expanded } }
         }
     }
 }
