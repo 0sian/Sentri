@@ -34,6 +34,7 @@ import ai
 import audit
 import cu
 import keymap
+import library
 import memory
 import pc_tools
 import session
@@ -48,6 +49,7 @@ DEVICE_NAME = "companion-virtual-input"
 QUEUE_LIMIT = 1000  # pending input messages per connection before new ones are dropped
 CHAT_TYPES = {"chat", "chat_cancel", "chat_reset", "confirm"}
 ACTION_TYPES = {"actions_get", "action"}
+LIBRARY_TYPES = {"audit_get", "memory_get", "memory_add", "memory_edit", "memory_forget", "routines_get"}
 INPUT_TYPES = {"mv", "sc", "btn", "text", "key"}
 MAX_PASTE_RUNS = 3  # a text message needing more separate pastes than this is pasted whole
 
@@ -392,10 +394,11 @@ class ToolInput:
 
 class Server:
     def __init__(self, vin: VirtualInput, token: str, max_step: float, assistant: ai.Assistant = None,
-                 input_lock: asyncio.Lock = None, quick: "actions.Actions" = None):
+                 input_lock: asyncio.Lock = None, quick: "actions.Actions" = None, lib: "library.Library" = None):
         self.vin = vin
         self.quick = quick   # quick actions (lock, sleep, ...): no AI needed
         self._bg = set()
+        self.lib = lib       # activity log / memory / routines for the phone's Activity screen
         self.input_lock = input_lock or asyncio.Lock()
         self.token = token.encode()
         self.max_step = max_step
@@ -438,7 +441,7 @@ class Server:
         mac = await asyncio.to_thread(wol_mac)
         if mac:
             ok["mac"] = mac  # the phone's Wake PC button
-        caps = ["actions"] if self.quick else []
+        caps = (["actions"] if self.quick else []) + (self.lib.caps() if self.lib else [])
         if self.assistant:
             caps = ["chat"] + (["cu"] if "start_computer_use" in self.assistant.tools else []) + caps
             ok.update(model=self.assistant.cfg.model)
@@ -475,6 +478,9 @@ class Server:
                     elif m["t"] == "guide_clear":   # proposed, optional: dismiss the on-screen guide
                         if self.assistant and self.assistant.overlay is not None:
                             await self.assistant.overlay.send({"cmd": "clear"}, spawn=False)
+                    elif m["t"] in LIBRARY_TYPES:
+                        if self.lib:
+                            await self._library(m, send)
                     elif m["t"] in ACTION_TYPES:
                         if self.quick:
                             await self._quick(m, send)
@@ -511,6 +517,25 @@ class Server:
             if self.assistant and self.active is None:
                 self.assistant.notch("idle")
                 self.assistant.gaze_stop()
+
+    async def _library(self, m: dict, send):
+        """audit_get {n} -> audit; memory_get -> memory; memory_add/edit/forget {rid,...} -> memory_result
+        then a fresh memory list; routines_get -> routines."""
+        t = m["t"]
+        if t == "audit_get":
+            await send({"t": "audit", "items": self.lib.audit_items(m.get("n"))})
+        elif t == "memory_get":
+            await send({"t": "memory", **self.lib.memory_view()})
+        elif t == "routines_get":
+            await send({"t": "routines", "items": self.lib.routine_items()})
+        else:
+            rid = m.get("rid")
+            if isinstance(rid, bool) or not isinstance(rid, (int, type(None))):
+                return
+            ok, msg = await asyncio.to_thread(self.lib.memory_op, m)
+            await send({"t": "memory_result", "rid": rid, "ok": ok, "msg": msg})
+            if ok:
+                await send({"t": "memory", **self.lib.memory_view()})
 
     async def _quick(self, m: dict, send):
         """actions_get -> the list; action {id, rid, confirmed?} -> action_result {rid, id, ok, msg}."""
@@ -589,7 +614,9 @@ async def amain(args):
     routines = tools["run_routine"].routines if "run_routine" in tools else {}
     quick = actions.Actions(routines, tools.get("run_routine"), assistant.audit if assistant else audit.AuditLog(),
                             lambda: bool(wol_mac()))
-    srv = Server(vin, token, args.max_step, assistant, input_lock, quick)
+    lib = library.Library(assistant.audit if assistant else audit.AuditLog(),
+                          assistant.store if assistant else memory.MemoryStore(), routines)
+    srv = Server(vin, token, args.max_step, assistant, input_lock, quick, lib)
     watcher = asyncio.create_task(watch_session(vin))
     mac = wol_mac()
     log.info("Wake-on-LAN %s", f"available: telling the phone {mac}" if mac else

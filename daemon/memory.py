@@ -142,6 +142,17 @@ class MemoryStore:
         self._save()
         return entry, None
 
+    def update(self, mid: str, text: str) -> Entry:
+        """Replace one memory's text in place (id and date kept). For Osian's own edits from the phone."""
+        text = self.check(text)
+        self._reload()
+        e = next((e for e in self._entries if e.id == mid), None)
+        if e is None:
+            raise MemoryError_("no memory with that id")
+        e.text = text
+        self._save()
+        return e
+
     def get(self, mid: str):
         return next((e for e in self.entries() if e.id == mid), None)
 

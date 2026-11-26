@@ -85,7 +85,29 @@ is the routine's own summary). Example:
 <- {"t":"action_result","rid":1,"id":"lock","ok":true,"msg":"Locked"}
 ```
 
+### Activity, memory and routines (2026-11-26, additive; `caps` may contain `audit`, `memory`, `routines`)
+Read the audit log, manage the AI's memory and see the routines, from the phone. Each capability is only
+announced when the PC has it (`routines` only if ai.toml defines some). Routines are read-only here: they live in
+ai.toml (which holds the API key and decides what may run), so the phone can list them and run them through
+Quick actions (`routine:<name>`), but never edit them.
+
+| direction | message | meaning |
+|---|---|---|
+| phone -> PC | `{"t":"audit_get","n":50}` | last `n` (1-200, default 50) tool calls |
+| PC -> phone | `{"t":"audit","items":[{"ts","tool","summary","approval","result","detail"?,"session"?}]}` | oldest first. `approval`: auto / allowed / denied / timeout / `phone button` (Quick actions) / `phone` (memory edits). `result`: ok / error / not run. Typed text is already cut to 40 chars; no tool output is ever stored |
+| phone -> PC | `{"t":"memory_get"}` | the memory list |
+| PC -> phone | `{"t":"memory","items":[{"id","text","created"}],"max":100,"max_text":200,"broken":false}` | `broken: true` means the memory file has a syntax error: every edit is refused until it is fixed on the PC |
+| phone -> PC | `{"t":"memory_add","text","rid"}` `{"t":"memory_edit","id","text","rid"}` `{"t":"memory_forget","id","rid"}` | Osian's own edits. Same checks as the AI's tools (length, no secrets, size cap); a near-duplicate add updates the old one |
+| PC -> phone | `{"t":"memory_result","rid","ok","msg"}` then, if `ok`, a fresh `memory` | `msg` is a short reason when refused |
+| phone -> PC | `{"t":"routines_get"}` | the routines list |
+| PC -> phone | `{"t":"routines","items":[{"name","description","risk"?,"steps":["Open Firefox",...]}]}` | `risk` is `low` / `high` when the routine needs approval |
+
+The AI reads memory as a snapshot taken when a conversation starts (this keeps its prompt cache valid), so edits
+made here apply from the next conversation (`chat_reset`, a daemon restart or a context trim), not mid-chat.
+Memory changes made here are written to the audit log as tool `memory`, approval `phone` (what changed is not logged).
+
 ## Changes since v0.1
+- 2026-11-26: activity / memory / routines messages and `caps` `audit` `memory` `routines`, additive.
 - 2026-11-26: quick actions (`actions_get`, `actions`, `action`, `action_result`, `caps: actions`), additive.
 - 2026-10-22: `ping` `id` / `pong` added (additive).
 - 2026-10-22: `ok.mac` and close codes 1001/1008 (above), both additive. The
