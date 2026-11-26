@@ -12,18 +12,23 @@ android {
         applicationId = "uk.osianj.companion"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 22
+        versionName = "1.1.0"
     }
 
-    // Bundled debug keystore so every build is signed with the same key and installs
-    // over the previous one without wiping the app's saved pairing.
-    signingConfigs {
-        getByName("debug") {
-            storeFile = file("debug.keystore")
-            storePassword = "android"
-            keyAlias = "androiddebugkey"
-            keyPassword = "android"
+    // If app/debug.keystore exists, every build is signed with that same key, so a new APK installs over the
+    // previous one and keeps the app's saved pairing. The file is NOT in git (see .gitignore): copy it in from
+    // your own backup. Without it Android Gradle Plugin falls back to its per-machine debug key, and the first
+    // install onto a phone that has a differently-signed copy needs an uninstall first (which wipes the pairing).
+    val bundledKey = file("debug.keystore")
+    if (bundledKey.exists()) {
+        signingConfigs {
+            getByName("debug") {
+                storeFile = bundledKey
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
         }
     }
 
@@ -54,4 +59,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // JVM unit tests (the chat state reducer is plain Kotlin + org.json)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

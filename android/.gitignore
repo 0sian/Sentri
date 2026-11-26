@@ -1,0 +1,13 @@
+# build outputs and tool state
+build/
+app/build/
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+
+# signing material: never commit
+*.keystore
+*.jks
+keystore.properties

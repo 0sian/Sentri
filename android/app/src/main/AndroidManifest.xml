@@ -2,12 +2,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Android 11+ hides other apps unless declared: needed to find the speech recogniser. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
 
     <!-- The daemon speaks plain ws:// on your LAN / Tailscale; auth is HMAC challenge-response. -->
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
-        android:label="Companion"
+        android:label="Sentri"
         android:theme="@style/Theme.Companion"
         android:usesCleartextTraffic="true">
 

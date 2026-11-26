@@ -1,17 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Generated: yellow cloud with outlined white happy eyes. The cloud deliberately bleeds off the bottom edge; the eyes stay inside the safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- trackpad outline -->
+    <path
+        android:fillColor="#FFD60A"
+        android:pathData="M20,71.91a17,14.05 0 1,0 34,0a17,14.05 0 1,0 -34,0z M54,74.16a17,14.05 0 1,0 34,0a17,14.05 0 1,0 -34,0z M35.3,56.45a18.7,15.46 0 1,0 37.4,0a18.7,15.46 0 1,0 -37.4,0z M32.92,78.93a21.08,17.42 0 1,0 42.16,0a21.08,17.42 0 1,0 -42.16,0z M58.76,62.07a12.92,10.68 0 1,0 25.84,0a12.92,10.68 0 1,0 -25.84,0z M23.06,59.26a12.24,10.12 0 1,0 24.48,0a12.24,10.12 0 1,0 -24.48,0z M21.7,86.52a32.3,26.7 0 1,0 64.6,0a32.3,26.7 0 1,0 -64.6,0z" />
     <path
         android:fillColor="#00000000"
-        android:strokeColor="#E3B05B"
-        android:strokeWidth="4"
-        android:pathData="M38,30 h32 a8,8 0 0 1 8,8 v32 a8,8 0 0 1 -8,8 h-32 a8,8 0 0 1 -8,-8 v-32 a8,8 0 0 1 8,-8 z" />
-    <!-- finger dot -->
+        android:strokeColor="#121110"
+        android:strokeWidth="5.8"
+        android:strokeLineCap="round"
+        android:pathData="M33.18,59.7A8,7.6 0 0,1 48.22,59.7 M59.78,59.7A8,7.6 0 0,1 74.82,59.7" />
     <path
-        android:fillColor="#E3B05B"
-        android:pathData="M54,54m-6,0a6,6 0 1,1 12,0a6,6 0 1,1 -12,0" />
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="3.8"
+        android:strokeLineCap="round"
+        android:pathData="M33.18,59.7A8,7.6 0 0,1 48.22,59.7 M59.78,59.7A8,7.6 0 0,1 74.82,59.7" />
 </vector>
