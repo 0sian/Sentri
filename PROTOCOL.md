@@ -61,7 +61,32 @@ browser copy returns as plain text without its rich-text version). Daemon flag
   `1008` refused because this address failed authentication too often (5 failures: 30 s;
   20 failures: 10 min; cleared by a success or an hour without failures).
 
+### Quick actions (2026-11-26, additive; `caps` contains `"actions"`)
+One-tap actions that need no AI: lock, sleep, screen off, log out, restart, shut down, a couple of Caelestia
+toggles (game mode, do not disturb) and Osian's own routines. The list comes from the daemon, so it
+only offers what this PC can do. Receivers ignore unknown messages, so old apps and old daemons are unaffected.
+
+| direction | message | meaning |
+|---|---|---|
+| phone -> PC | `{"t":"actions_get"}` | ask for the list (send after `ok` when `caps` has `actions`) |
+| PC -> phone | `{"t":"actions","items":[{"id","label","group","confirm"?,"danger"?}]}` | `group` is a section title (Session, Desktop, Power, Routines). `confirm` is the text of a dialog the phone **must** show first; `danger` means draw it red |
+| phone -> PC | `{"t":"action","id":"logout","rid":3,"confirmed":true}` | run one action by exact id; `rid` (int) is echoed back; `confirmed:true` is required exactly when the item had `confirm` |
+| PC -> phone | `{"t":"action_result","rid":3,"id":"logout","ok":true,"msg":"Logging out"}` | `ok:false` carries a short reason (e.g. "Can't sleep yet: media-idle-inhibit: Media is actively playing") |
+
+Actions that end the session or the link (sleep, log out, restart, shut down) are acknowledged first and
+carried out about 0.4 s later, so the reply arrives. One action runs at a time ("busy with another action").
+Every run is written to the audit log as tool `quick_action`, approval `phone button`. Routines run exactly
+as `run_routine` would, with the phone's confirm dialog standing in for the approval card (the dialog text
+is the routine's own summary). Example:
+```json
+-> {"t":"actions_get"}
+<- {"t":"actions","items":[{"id":"lock","label":"Lock","group":"Session"},{"id":"logout","label":"Log out","group":"Session","confirm":"Log out? Open apps will be closed.","danger":true}]}
+-> {"t":"action","id":"lock","rid":1}
+<- {"t":"action_result","rid":1,"id":"lock","ok":true,"msg":"Locked"}
+```
+
 ## Changes since v0.1
+- 2026-11-26: quick actions (`actions_get`, `actions`, `action`, `action_result`, `caps: actions`), additive.
 - 2026-10-22: `ping` `id` / `pong` added (additive).
 - 2026-10-22: `ok.mac` and close codes 1001/1008 (above), both additive. The
   keymap detection and paste fallback change what `text` produces on screen, not the messages.

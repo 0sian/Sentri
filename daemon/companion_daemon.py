@@ -29,11 +29,13 @@ from pathlib import Path
 import websockets
 from evdev import UInput, ecodes as e
 
+import actions
 import ai
 import audit
 import cu
 import keymap
 import memory
+import pc_tools
 import session
 from clipboard import ClipboardPaste
 
@@ -45,6 +47,7 @@ DEFAULT_PORT = 8765
 DEVICE_NAME = "companion-virtual-input"
 QUEUE_LIMIT = 1000  # pending input messages per connection before new ones are dropped
 CHAT_TYPES = {"chat", "chat_cancel", "chat_reset", "confirm"}
+ACTION_TYPES = {"actions_get", "action"}
 INPUT_TYPES = {"mv", "sc", "btn", "text", "key"}
 MAX_PASTE_RUNS = 3  # a text message needing more separate pastes than this is pasted whole
 
@@ -389,8 +392,10 @@ class ToolInput:
 
 class Server:
     def __init__(self, vin: VirtualInput, token: str, max_step: float, assistant: ai.Assistant = None,
-                 input_lock: asyncio.Lock = None):
+                 input_lock: asyncio.Lock = None, quick: "actions.Actions" = None):
         self.vin = vin
+        self.quick = quick   # quick actions (lock, sleep, ...): no AI needed
+        self._bg = set()
         self.input_lock = input_lock or asyncio.Lock()
         self.token = token.encode()
         self.max_step = max_step
@@ -433,9 +438,12 @@ class Server:
         mac = await asyncio.to_thread(wol_mac)
         if mac:
             ok["mac"] = mac  # the phone's Wake PC button
+        caps = ["actions"] if self.quick else []
         if self.assistant:
-            caps = ["chat"] + (["cu"] if "start_computer_use" in self.assistant.tools else [])
-            ok.update(caps=caps, model=self.assistant.cfg.model)
+            caps = ["chat"] + (["cu"] if "start_computer_use" in self.assistant.tools else []) + caps
+            ok.update(model=self.assistant.cfg.model)
+        if caps:
+            ok.update(caps=caps)
         await ws.send(json.dumps(ok))
         log.info("client connected: %s", peer)
         if self.assistant:
@@ -467,6 +475,9 @@ class Server:
                     elif m["t"] == "guide_clear":   # proposed, optional: dismiss the on-screen guide
                         if self.assistant and self.assistant.overlay is not None:
                             await self.assistant.overlay.send({"cmd": "clear"}, spawn=False)
+                    elif m["t"] in ACTION_TYPES:
+                        if self.quick:
+                            await self._quick(m, send)
                     elif m["t"] in CHAT_TYPES:
                         # chat runs in its own task; handle() only starts or cancels it
                         if chat:
@@ -500,6 +511,25 @@ class Server:
             if self.assistant and self.active is None:
                 self.assistant.notch("idle")
                 self.assistant.gaze_stop()
+
+    async def _quick(self, m: dict, send):
+        """actions_get -> the list; action {id, rid, confirmed?} -> action_result {rid, id, ok, msg}."""
+        if m["t"] == "actions_get":
+            await send({"t": "actions", "items": self.quick.listing()})
+            return
+        rid, aid = m.get("rid"), m.get("id")
+        if not isinstance(aid, str) or isinstance(rid, bool) or not isinstance(rid, (int, type(None))):
+            return
+        try:
+            res = await self.quick.run(aid, m.get("confirmed") is True)
+        except pc_tools.ToolError as ex:
+            await send({"t": "action_result", "rid": rid, "id": aid, "ok": False, "msg": str(ex)[:160]})
+            return
+        await send({"t": "action_result", "rid": rid, "id": aid, "ok": True, "msg": res.msg})
+        task = actions.spawn_after(res)    # acts after the reply: the session or the link may be about to end
+        if task:
+            self._bg.add(task)
+            task.add_done_callback(self._bg.discard)
 
     async def _apply_input(self, queue: asyncio.Queue):
         while True:
@@ -555,7 +585,11 @@ async def amain(args):
                              desktop=cu.AutoDesktop(vin, input_lock), audit=audit.AuditLog()) if cfg else None
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
-    srv = Server(vin, token, args.max_step, assistant, input_lock)
+    tools = assistant.tools if assistant else {}
+    routines = tools["run_routine"].routines if "run_routine" in tools else {}
+    quick = actions.Actions(routines, tools.get("run_routine"), assistant.audit if assistant else audit.AuditLog(),
+                            lambda: bool(wol_mac()))
+    srv = Server(vin, token, args.max_step, assistant, input_lock, quick)
     watcher = asyncio.create_task(watch_session(vin))
     mac = wol_mac()
     log.info("Wake-on-LAN %s", f"available: telling the phone {mac}" if mac else
