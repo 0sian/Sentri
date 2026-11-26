@@ -53,6 +53,7 @@ import doctor
 import gaze
 import guide
 import homelab_watch
+import notices
 import memory
 import pc_tools
 import sensitivity
@@ -400,6 +401,7 @@ class Assistant:
         self._card_waiters = {}
         self.homelab_watcher = None
         self.doctor_watcher = None
+        self.timers = self.watches = None
         self._watch_task = self._doctor_task = None
         self._notch_tasks = set()
         if desktop is not None and "point_at_screen" not in tools:
@@ -408,6 +410,10 @@ class Assistant:
                 self.overlay, desktop, guide.Locator(self.backend, guide.GUIDE_MODEL, self._check_budget, self._add_usage),
                 sensitivity.Policy(cfg.guide_safe_apps, cfg.guide_ask_words))
             tools["clear_guide"] = guide.ClearGuide(self.overlay)
+            self.timers = notices.Timers(self._timer_fire, self._timers_sync)
+            self.watches = notices.Watches(self._watch_done)
+            tools["timer"] = notices.TimerTool(self.timers)
+            tools["watch_process"] = notices.WatchProcessTool(self.watches)
         self.tools = tools
         if self.overlay is not None and "system_doctor" in tools and cfg.doctor_alerts:
             self.doctor_watcher = doctor.Watcher(lambda rows, ttl: self.notch_alert("PC alert", rows, ttl),
@@ -465,10 +471,33 @@ class Assistant:
             self._gaze_task = asyncio.ensure_future(
                 gaze.watch(lambda m: self.overlay.send(m, spawn=False), self.overlay._alive))
             self._listen_task = asyncio.ensure_future(self.overlay.listen(self._overlay_event))
+        if self.timers is not None and self.timers.items:
+            self._fire(self.overlay.send({"cmd": "timers", "items": self.timers.listing()}, spawn=True))
         if self.homelab_watcher is not None and (self._watch_task is None or self._watch_task.done()):
             self._watch_task = asyncio.ensure_future(self.homelab_watcher.run())
         if self.doctor_watcher is not None and (self._doctor_task is None or self._doctor_task.done()):
             self._doctor_task = asyncio.ensure_future(self.doctor_watcher.run())
+
+    def start(self):
+        """Arm saved timers (call once the event loop runs)."""
+        if self.timers is not None:
+            self.timers.start()
+
+    def _timers_sync(self, items: list):
+        if self.overlay is not None:
+            self._fire(self.overlay.send({"cmd": "timers", "items": items}, spawn=False))
+
+    async def _timer_fire(self, label: str, late: float):
+        """A timer ended: sticky peek until tapped, happy eyes and a chime. Starts the notch if it isn't up."""
+        text = label + (f" (was due {int(late // 60)} min ago)" if late >= 90 else "")
+        await self.overlay.send({"cmd": "peek", "title": "Timer", "rows": [{"t": text[:pc_tools.PEEK_WIDTH], "l": 1}], "sticky": True}, spawn=True)
+        self.notch_mood("excited")
+        await notices.play(notices.SOUND)
+
+    async def _watch_done(self, name: str):
+        await self.overlay.send({"cmd": "peek", "title": "Finished", "rows": [{"t": f"{name} finished"[:pc_tools.PEEK_WIDTH], "l": 0}], "ttl": 15}, spawn=True)
+        self.notch_mood("happy")
+        await notices.play(notices.DONE_SOUND)
 
     def notch_alert(self, title: str, rows: list, ttl: int):
         """A proactive alert (homelab, PC health): the rows peek out of the notch and the eyes look startled."""
@@ -522,6 +551,10 @@ class Assistant:
 
     async def close(self):
         self.gaze_stop()
+        if self.timers is not None:
+            self.timers.stop()
+        if self.watches is not None:
+            self.watches.stop()
         if self.overlay is not None:
             await self.overlay.stop()
 

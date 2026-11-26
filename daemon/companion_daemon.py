@@ -608,6 +608,8 @@ async def amain(args):
     input_lock = asyncio.Lock()
     assistant = ai.Assistant(cfg, injector=ToolInput(vin, input_lock), store=memory.MemoryStore(),
                              desktop=cu.AutoDesktop(vin, input_lock), audit=audit.AuditLog()) if cfg else None
+    if assistant:
+        assistant.start()      # re-arm timers saved before the last restart
     log.info("AI chat %s", f"enabled ({cfg.model}, effort {cfg.effort})" if cfg else
              f"off (no api_key in {ai.AI_CONFIG} or ANTHROPIC_API_KEY)")
     tools = assistant.tools if assistant else {}

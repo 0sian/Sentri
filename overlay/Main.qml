@@ -175,6 +175,24 @@ QtObject {
         bridge.send_event(JSON.stringify({ event: "confirm", call: card.call, allow: allow }))
         clearCard()
     }
+    // ---- Timers: the daemon sends absolute end times; the countdown only ticks while one exists ----
+    property var timersList: []        // [{label, end}] end = epoch seconds
+    property real nowSecs: Date.now() / 1000
+    property var timerTick: Timer { interval: 1000; repeat: true; running: root.timersList.length > 0
+        onTriggered: root.nowSecs = Date.now() / 1000 }
+    function setTimers(items) {
+        var out = []
+        for (var i = 0; items && i < items.length && i < 10; i++) out.push({ label: String(items[i].label), end: Number(items[i].end) })
+        out.sort(function (a, b) { return a.end - b.end })
+        root.timersList = out
+        root.nowSecs = Date.now() / 1000
+    }
+    function remaining() {
+        if (timersList.length === 0) return ""
+        var s = Math.max(0, Math.round(timersList[0].end - nowSecs)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60
+        return (h > 0 ? h + ":" + (m < 10 ? "0" : "") + m : m) + ":" + (r < 10 ? "0" : "") + r
+    }
+
     // ---- Peek: a few lines of data (homelab stats) under the eyes for a few seconds ----
     property var peek: null            // { title, rows: [{t, l}] }
     function showPeek(args) {
@@ -185,7 +203,8 @@ QtObject {
         for (var i = 0; i < src.length && i < 5; i++) rows.push({ t: String(src[i].t), l: Number(src[i].l) || 0 })
         if (rows.length === 0) return
         peek = { title: String(args.title || ""), rows: rows }
-        peekTimer.interval = (Number(args.ttl) || 8) * 1000; peekTimer.restart()
+        if (args.sticky === true) peekTimer.stop()          // a reminder stays until the notch is tapped
+        else { peekTimer.interval = (Number(args.ttl) || 8) * 1000; peekTimer.restart() }
     }
     function clearPeek() { peek = null; peekTimer.stop() }
     property var peekTimer: Timer { onTriggered: root.peek = null }
@@ -202,6 +221,7 @@ QtObject {
             else if (cmd === "mood") root.setMood(String(args.name))
             else if (cmd === "cursor") root.cursorAt(Number(args.x), Number(args.y))
             else if (cmd === "peek") root.showPeek(args)
+            else if (cmd === "timers") root.setTimers(args.items)
             else if (cmd === "confirm") root.showCard(args)
             else if (cmd === "confirm_clear") root.clearCard(String(args.call))
             else if (cmd === "debug") root.debug = !!args.on
@@ -291,6 +311,11 @@ QtObject {
                     pupil: root.lk("pupil", 1); bot: root.lk("bot", 0); shake: root.lk("shake", false)
                     topL: root.lk("top", 0); topR: root.lk("topR", root.lk("top", 0))
                     angL: root.lk("ang", 0); angR: root.lk("angR", -root.lk("ang", 0))
+                }
+                Text {   // nearest timer's countdown, right of the eyes (only while a timer is running)
+                    visible: root.timersList.length > 0 && !root.expanded && !root.card && !root.peek
+                    anchors.right: parent.right; anchors.rightMargin: 18; y: 15
+                    text: root.remaining(); color: "#2b2400"; font.pixelSize: 12; font.bold: true; opacity: 0.8
                 }
                 Text { visible: root.expanded && !root.card && !root.peek; anchors.centerIn: parent; anchors.verticalCenterOffset: 22
                        text: "ask me where something is"; color: "#2b2400"; font.pixelSize: 15 }
