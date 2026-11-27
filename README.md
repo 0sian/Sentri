@@ -103,6 +103,21 @@ The service file runs the daemon from `~/companion/daemon`. If you cloned the re
 
 Then reboot. Run by hand with `.venv/bin/python companion_daemon.py`: it prints the LAN address and the pairing token. Enter both in the phone app once. Full details, the layout options and the optional AI setup are in [`daemon/README.md`](daemon/README.md).
 
+## Try it without a PC
+
+`daemon/tools/demo_server.py` is a fake daemon that speaks the whole protocol with made-up data: chat, approval
+cards, a computer-use session, the screen guide, Quick actions, and the Activity screen with its audit log, memory and
+routines. It needs no API key, touches nothing on your machine and listens on localhost only.
+
+```sh
+pip install websockets
+python daemon/tools/demo_server.py          # prints the token (demo)
+adb reverse tcp:8766 tcp:8766               # lets a USB or wireless-debugging phone reach it
+```
+
+Then in the app use address `127.0.0.1`, port `8766` and the token `demo`, and try "hello", "open firefox", "type
+something", "screenshot", "how do I find wifi", "use the computer" or "system health".
+
 ## Build it
 
 You need JDK 17 or newer, and the Android SDK with `platforms;android-35` and `build-tools;34.0.0`. No Android Studio required.
