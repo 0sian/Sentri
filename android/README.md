@@ -1,7 +1,7 @@
 # Sentri (Android)
 
 Phone side of Sentri: trackpad and keyboard for your PC, plus the AI companion. Talks to the PC daemon over a WebSocket
-(`ws://`, port 8765, HMAC challenge-response; the token is never sent). Full project context: `CLAUDE.md` in the repo root.
+(`ws://`, port 8765, HMAC challenge-response; the token is never sent). The wire protocol is in `PROTOCOL.md` and `PROTOCOL-AI.md` in the repo root.
 
 ## Build (command line, no Android Studio)
 Requirements: JDK 17 or newer (21 works), Android SDK with `platforms;android-35` and `build-tools;34.0.0`.

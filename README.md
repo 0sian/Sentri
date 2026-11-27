@@ -69,6 +69,8 @@ The API key lives **only on the PC** (in `~/.config/companion/ai.toml`, which th
 
 ## Security
 
+The full policy, including how to report a problem, is in [SECURITY.md](SECURITY.md).
+
 - **The token never crosses the network.** The phone proves it knows it with an HMAC over a one-time nonce.
 - **Whoever has the token controls your mouse and keyboard.** The token file is created mode 600. Delete it and restart the daemon to rotate it.
 - **The link is plain `ws://`.** That's fine on a home LAN. Away from home, go over Tailscale or WireGuard, and never expose port 8765 to the internet. Allow it from your LAN only in the firewall.
@@ -126,6 +128,10 @@ Not done yet:
 - Letting a chat turn survive the phone dropping, and out-of-band notifications (KDE Connect or ntfy) so alerts and approvals reach a backgrounded phone
 - A Quick Settings tile and launcher shortcuts for Quick actions
 - A browser tool over CDP (tried and parked: a fresh Vivaldi profile never answered page commands)
+
+## License
+
+[MIT](LICENSE). See [SECURITY.md](SECURITY.md) for what protects the link and what doesn't, and how to report a problem.
 
 ## Credits
 
