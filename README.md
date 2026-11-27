@@ -14,6 +14,14 @@
 
 <br />
 
+<div align="center">
+
+<img src="docs/hero.png" alt="Sentri: chat, an approval card, a computer-use session and Quick actions" />
+
+</div>
+
+<br />
+
 Sentri turns your phone into a **trackpad and keyboard for your Linux PC**, and into a small **AI companion** that can look at your screen, point things out and act on your say-so. A plain yellow cloud is its face, on the phone and as a little pair of eyes in the notch of your desktop.
 
 It works on **KDE Plasma and Hyprland** (Wayland). Input is injected through `/dev/uinput`, below the compositor, so it needs no compositor-specific hooks, and it works at the **login screen** too.
@@ -39,6 +47,28 @@ It works on **KDE Plasma and Hyprland** (Wayland). Input is injected through `/d
 **Quick actions and more**
 - Lock, sleep, screen off, log out, restart, shut down, game mode and Do Not Disturb, from one screen. Destructive ones need confirmation.
 - **Wake-on-LAN** from the phone when the PC reports its MAC address.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/chat.png" width="200" /><br /><sub>Chat, with the cloud's moods</sub></td>
+    <td align="center"><img src="docs/screenshots/approval.png" width="200" /><br /><sub>Risky actions ask first</sub></td>
+    <td align="center"><img src="docs/screenshots/guide.png" width="200" /><br /><sub>The AI points at your screen</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/computer-use.png" width="200" /><br /><sub>Computer use, with a Stop button</sub></td>
+    <td align="center"><img src="docs/screenshots/quick-actions.png" width="200" /><br /><sub>Quick actions</sub></td>
+    <td align="center"><img src="docs/screenshots/controller.png" width="200" /><br /><sub>Trackpad and keyboard</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/screenshots/activity-log.png" width="200" /><br /><sub>Everything it did, logged</sub></td>
+    <td align="center"><img src="docs/screenshots/activity-memory.png" width="200" /><br /><sub>What it remembers, editable</sub></td>
+    <td align="center"><img src="docs/screenshots/settings.png" width="200" /><br /><sub>Make the cloud yours</sub></td>
+  </tr>
+</table>
+
+<sub>Taken against the [demo daemon](#try-it-without-a-pc), so everything shown is made-up data.</sub>
 
 ## How it works
 
