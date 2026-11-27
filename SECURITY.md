@@ -35,5 +35,10 @@ to the `input` group: that would let every process you run read your physical ke
 
 ## Reporting a problem
 
-Please report vulnerabilities privately through this repository's **Security** tab ("Report a vulnerability") rather than
-in a public issue. Include what you did, what happened and what version you ran.
+Please report vulnerabilities privately rather than in a public issue. Either:
+
+- use this repository's **Security** tab ("Report a vulnerability"), or
+- email **git@osianj.com**.
+
+Include what you did, what happened and what version you ran. Please don't post working exploit details in a public issue
+or discussion before there's a fix.
